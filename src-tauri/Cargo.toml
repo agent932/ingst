@@ -1,0 +1,31 @@
+[package]
+name = "ingst"
+version = "0.1.0"
+description = "Media ingestion desktop application for creators"
+authors = ["Ingst Team"]
+edition = "2021"
+
+[lib]
+name = "ingst_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+walkdir = "2"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+log = "0.4"
+thiserror = "2"
+kamadak-exif = "0.5"
+dirs = "5"
