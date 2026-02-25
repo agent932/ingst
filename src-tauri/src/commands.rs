@@ -77,6 +77,8 @@ pub struct ProgressEvent {
     pub total: usize,
     pub bytes_copied: u64,
     pub total_bytes: u64,
+    pub current_file_bytes: u64,
+    pub current_file_total: u64,
     pub elapsed_secs: u64,
     pub status: String,
 }

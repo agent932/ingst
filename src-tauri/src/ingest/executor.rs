@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub async fn execute_plan<F>(
     app: &AppHandle,
@@ -27,6 +28,10 @@ where
     let total = plan.operations.len();
     let total_bytes = plan.total_size;
     
+    // Atomic for tracking current file progress
+    let current_file_bytes: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let should_emit_progress: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    
     // Create channel for progress updates
     let (progress_tx, progress_rx) = mpsc::channel::<ProgressEvent>();
     
@@ -45,6 +50,8 @@ where
         total,
         bytes_copied: 0,
         total_bytes,
+        current_file_bytes: 0,
+        current_file_total: 0,
         elapsed_secs: 0,
         status: "starting".to_string(),
     });
@@ -55,6 +62,10 @@ where
             break;
         }
         
+        // Reset current file bytes
+        current_file_bytes.store(0, Ordering::SeqCst);
+        should_emit_progress.store(false, Ordering::SeqCst);
+        
         // Emit progress at start of each file
         let _ = progress_tx.send(ProgressEvent {
             current_file: operation.source_path.clone(),
@@ -62,6 +73,8 @@ where
             total,
             bytes_copied,
             total_bytes,
+            current_file_bytes: 0,
+            current_file_total: operation.size,
             elapsed_secs: start_time.elapsed().as_secs(),
             status: "processing".to_string(),
         });
@@ -84,47 +97,22 @@ where
             "copy" => {
                 let source = operation.source_path.clone();
                 let dest = operation.dest_path.clone();
-                let tx = progress_tx.clone();
-                let total_files = total;
-                let file_index = index + 1;
-                let total_bytes_copy = total_bytes;
+                let bytes_tracker = current_file_bytes.clone();
+                let emit_flag = should_emit_progress.clone();
+                let file_size = operation.size;
                 
                 tokio::task::spawn_blocking(move || {
-                    copy_file_with_progress(&source, &dest, |bytesWritten, totalFileSize| {
-                        let progress = ProgressEvent {
-                            current_file: source.clone(),
-                            current_index: file_index,
-                            total: total_files,
-                            bytes_copied: bytesWritten,
-                            total_bytes: total_bytes_copy,
-                            elapsed_secs: 0, // Will be updated in main loop
-                            status: "processing".to_string(),
-                        };
-                        let _ = tx.send(progress);
-                    })
+                    copy_file_with_progress(&source, &dest, bytes_tracker, emit_flag)
                 }).await.map_err(|e| e.to_string())?
             }
             "move" => {
                 let source = operation.source_path.clone();
                 let dest = operation.dest_path.clone();
-                let tx = progress_tx.clone();
-                let total_files = total;
-                let file_index = index + 1;
-                let total_bytes_copy = total_bytes;
+                let bytes_tracker = current_file_bytes.clone();
+                let emit_flag = should_emit_progress.clone();
                 
                 tokio::task::spawn_blocking(move || {
-                    move_file_with_progress(&source, &dest, |bytesWritten, _totalFileSize| {
-                        let progress = ProgressEvent {
-                            current_file: source.clone(),
-                            current_index: file_index,
-                            total: total_files,
-                            bytes_copied: bytesWritten,
-                            total_bytes: total_bytes_copy,
-                            elapsed_secs: 0,
-                            status: "processing".to_string(),
-                        };
-                        let _ = tx.send(progress);
-                    })
+                    move_file_with_progress(&source, &dest, bytes_tracker, emit_flag)
                 }).await.map_err(|e| e.to_string())?
             }
             _ => Ok(()),
@@ -165,7 +153,7 @@ where
             }
         }
         
-        // Emit progress after each file
+        // Emit progress after each file completes
         let elapsed = start_time.elapsed().as_secs();
         let _ = progress_tx.send(ProgressEvent {
             current_file: operation.source_path.clone(),
@@ -173,6 +161,8 @@ where
             total,
             bytes_copied,
             total_bytes,
+            current_file_bytes: operation.size,
+            current_file_total: operation.size,
             elapsed_secs: elapsed,
             status: "processing".to_string(),
         });
@@ -191,6 +181,8 @@ where
         total,
         bytes_copied,
         total_bytes,
+        current_file_bytes: 0,
+        current_file_total: 0,
         elapsed_secs: start_time.elapsed().as_secs(),
         status: "complete".to_string(),
     };
@@ -215,10 +207,12 @@ where
     })
 }
 
-fn copy_file_with_progress<F>(source: &str, dest: &str, mut progress_callback: F) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    F: FnMut(u64, u64) + Send,
-{
+fn copy_file_with_progress(
+    source: &str, 
+    dest: &str, 
+    bytes_tracker: Arc<AtomicU64>,
+    _emit_flag: Arc<AtomicBool>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
     
@@ -228,7 +222,7 @@ where
     
     let total_size = source_path.metadata()?.len();
     let mut bytes_written: u64 = 0;
-    let chunk_size: u64 = 64 * 1024; // 64KB chunks for more frequent updates
+    let chunk_size: u64 = 64 * 1024; // 64KB chunks
     
     let mut source_file = std::fs::File::open(source_path)?;
     let mut dest_file = std::fs::File::create(dest_path)?;
@@ -244,17 +238,19 @@ where
         std::io::Write::write_all(&mut dest_file, &buffer[..bytes_read])?;
         bytes_written += bytes_read as u64;
         
-        // Emit progress after each chunk
-        progress_callback(bytes_written, total_size);
+        // Track bytes for current file
+        bytes_tracker.store(bytes_written, Ordering::SeqCst);
     }
     
     Ok(())
 }
 
-fn move_file_with_progress<F>(source: &str, dest: &str, mut progress_callback: F) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    F: FnMut(u64, u64) + Send,
-{
+fn move_file_with_progress(
+    source: &str, 
+    dest: &str, 
+    bytes_tracker: Arc<AtomicU64>,
+    _emit_flag: Arc<AtomicBool>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
     
@@ -266,12 +262,12 @@ where
     
     // Try rename first (fast)
     if std::fs::rename(source_path, dest_path).is_ok() {
-        progress_callback(total_size, total_size);
+        bytes_tracker.store(total_size, Ordering::SeqCst);
         return Ok(());
     }
     
     // Fall back to copy + delete with progress
-    copy_file_with_progress(source, dest, progress_callback)?;
+    copy_file_with_progress(source, dest, bytes_tracker, _emit_flag)?;
     std::fs::remove_file(source_path)?;
     
     Ok(())

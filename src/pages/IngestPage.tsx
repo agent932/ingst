@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useStore, IngestResult, ProgressEvent } from '../store/useStore';
@@ -47,11 +47,21 @@ export default function IngestPage() {
   
   const [error, setError] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
+  const lastProgressRef = useRef<ProgressEvent | null>(null);
+  const lastUpdateRef = useRef<number>(0);
 
   useEffect(() => {
     startIngest();
     
     const unlisten = listen<ProgressEvent>('ingest-progress', (event) => {
+      // Throttle updates to every 100ms for smooth UI
+      const now = Date.now();
+      if (now - lastUpdateRef.current < 100 && event.payload.status !== 'complete') {
+        lastProgressRef.current = event.payload;
+        return;
+      }
+      lastUpdateRef.current = now;
+      
       setProgress(event.payload);
       if (event.payload.status === 'complete') {
         setIsComplete(true);
@@ -99,11 +109,17 @@ export default function IngestPage() {
     ? Math.round(((progress.current_index - 1) / Math.max(progress.total, 1)) * 100)
     : 0;
   
-  const speed = progress && progress.elapsed_secs > 0
-    ? Math.round(progress.bytes_copied / progress.elapsed_secs / 1024 / 1024)
+  const elapsedSecs = progress?.elapsed_secs || 0;
+  const speed = elapsedSecs > 0 && progress && progress.bytes_copied > 0
+    ? Math.round(progress.bytes_copied / elapsedSecs / 1024 / 1024)
     : 0;
   
-  // Calculate ETA
+  // Calculate current file progress
+  const currentFileProgress = progress && progress.current_file_total > 0
+    ? Math.round((progress.current_file_bytes / progress.current_file_total) * 100)
+    : 0;
+  
+// Calculate ETA
   const remainingBytes = progress ? progress.total_bytes - progress.bytes_copied : 0;
   const etaSecs = speed > 0 && remainingBytes > 0 ? Math.round(remainingBytes / (speed * 1024 * 1024)) : null;
   
@@ -151,7 +167,7 @@ export default function IngestPage() {
           </span>
         </div>
 
-        {/* Progress bar */}
+        {/* Overall progress bar */}
         <div className="mb-6">
           <div className="flex justify-between text-sm mb-2">
             <span className="text-gray-600 dark:text-gray-400">
@@ -169,12 +185,20 @@ export default function IngestPage() {
 
         {/* Current file */}
         <div className="mb-6 p-4 bg-gray-50 dark:bg-slate-800 rounded-lg">
-          <div className="flex items-center gap-2 mb-2">
-            <svg className="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Current File</span>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <svg className="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Current File</span>
+            </div>
+            {progress && progress.current_file_total > 0 && (
+              <span className="text-xs font-medium text-accent">
+                {currentFileProgress}% ({formatSize(progress.current_file_bytes)} / {formatSize(progress.current_file_total)})
+              </span>
+            )}
           </div>
+          
           <p className="font-mono text-sm text-gray-900 dark:text-white truncate" title={progress?.current_file}>
             {progress?.current_file ? getFileName(progress.current_file) : '-'}
           </p>
@@ -182,6 +206,18 @@ export default function IngestPage() {
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
               {getFolderName(progress.current_file)}
             </p>
+          )}
+          
+          {/* Current file progress bar */}
+          {progress && progress.current_file_total > 0 && (
+            <div className="mt-3">
+              <div className="h-1.5 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-green-500 transition-all duration-300"
+                  style={{ width: `${currentFileProgress}%` }}
+                />
+              </div>
+            </div>
           )}
         </div>
 

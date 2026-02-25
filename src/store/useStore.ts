@@ -47,6 +47,8 @@ export interface ProgressEvent {
   total: number;
   bytes_copied: number;
   total_bytes: number;
+  current_file_bytes: number;
+  current_file_total: number;
   elapsed_secs: number;
   status: string;
 }
