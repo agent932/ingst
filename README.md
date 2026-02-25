@@ -17,9 +17,12 @@ A polished desktop app that helps creators ingest footage from cameras, SD cards
 ### macOS
 
 **Option 1: DMG Installer**
-1. Download `Ingst_0.1.0_aarch64.dmg` from the releases
-2. Open the DMG file
-3. Drag `Ingst.app` to your Applications folder
+1. Download `Ingst_0.1.0_aarch64.dmg` or `Ingst_aarch64.app.tar.gz` from the releases
+2. If using DMG: Open and drag `Ingst.app` to Applications
+3. If using .tar.gz: Extract and move `Ingst.app` to Applications
+4. **If you see "damaged" error**: 
+   - Right-click the app → "Open" → Click "Open" in the dialog
+   - Or run: `xattr -cr /Applications/Ingst.app`
 
 **Option 2: Build from Source**
 ```bash
