@@ -18,13 +18,25 @@ where
     let mut success_count = 0;
     let mut skipped_count = 0;
     let mut error_count = 0;
-    let mut errors: Vec<String> = Vec::new();
+    let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut bytes_copied: u64 = 0;
     
-    let log_entries = Arc::new(Mutex::new(Vec::new()));
+    let log_entries: Arc<Mutex<Vec<crate::ingest::logging::LogEntry>>> = Arc::new(Mutex::new(Vec::new()));
     
     let total = plan.operations.len();
     let total_bytes = plan.total_size;
+    
+    // Emit initial progress
+    let progress = ProgressEvent {
+        current_file: "Starting...".to_string(),
+        current_index: 0,
+        total,
+        bytes_copied: 0,
+        total_bytes,
+        elapsed_secs: 0,
+        status: "starting".to_string(),
+    };
+    app.emit("ingest-progress", &progress).ok();
     
     for (index, operation) in plan.operations.iter().enumerate() {
         if is_cancelled() {
@@ -32,6 +44,7 @@ where
             break;
         }
         
+        // Emit progress at start of each file
         let progress = ProgressEvent {
             current_file: operation.source_path.clone(),
             current_index: index + 1,
@@ -41,7 +54,6 @@ where
             elapsed_secs: start_time.elapsed().as_secs(),
             status: "processing".to_string(),
         };
-        
         app.emit("ingest-progress", &progress).ok();
         
         let result = match operation.action.as_str() {
@@ -59,8 +71,20 @@ where
                 ));
                 Ok(())
             }
-            "copy" => copy_file(&operation.source_path, &operation.dest_path),
-            "move" => move_file(&operation.source_path, &operation.dest_path),
+            "copy" => {
+                let source = operation.source_path.clone();
+                let dest = operation.dest_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    copy_file_sync(&source, &dest)
+                }).await.map_err(|e| e.to_string())?
+            }
+            "move" => {
+                let source = operation.source_path.clone();
+                let dest = operation.dest_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    move_file_sync(&source, &dest)
+                }).await.map_err(|e| e.to_string())?
+            }
             _ => Ok(()),
         };
         
@@ -83,7 +107,7 @@ where
             Err(e) => {
                 error_count += 1;
                 let error_msg = format!("{}: {}", operation.source_path, e);
-                errors.push(error_msg.clone());
+                errors.lock().unwrap().push(error_msg.clone());
                 log::error!("Error processing file: {}", error_msg);
                 
                 log_entries.lock().unwrap().push(create_log_entry(
@@ -98,6 +122,19 @@ where
                 ));
             }
         }
+        
+        // Emit progress after each file
+        let elapsed = start_time.elapsed().as_secs();
+        let progress = ProgressEvent {
+            current_file: operation.source_path.clone(),
+            current_index: index + 1,
+            total,
+            bytes_copied,
+            total_bytes,
+            elapsed_secs: elapsed,
+            status: "processing".to_string(),
+        };
+        app.emit("ingest-progress", &progress).ok();
     }
     
     let log_path = crate::ingest::logging::save_log(
@@ -126,16 +163,18 @@ where
         error_count
     );
     
+    let final_errors = errors.lock().unwrap().clone();
+    
     Ok(IngestResult {
         success_count,
         skipped_count,
         error_count,
-        errors,
+        errors: final_errors,
         log_path,
     })
 }
 
-fn copy_file(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn copy_file_sync(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
     
@@ -148,7 +187,7 @@ fn copy_file(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error +
     Ok(())
 }
 
-fn move_file(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn move_file_sync(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
     
@@ -157,7 +196,7 @@ fn move_file(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error +
     }
     
     std::fs::rename(source_path, dest_path).or_else(|_| {
-        copy_file(source, dest)?;
+        copy_file_sync(source, dest)?;
         std::fs::remove_file(source_path)?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })?;

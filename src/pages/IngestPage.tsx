@@ -26,6 +26,11 @@ function getFileName(path: string): string {
   return path.split('/').pop() || path;
 }
 
+function getFolderName(path: string): string {
+  const parts = path.split('/');
+  return parts.length > 1 ? parts.slice(-2, -1)[0] || '' : '';
+}
+
 export default function IngestPage() {
   const { 
     ingestPlan, 
@@ -91,12 +96,26 @@ export default function IngestPage() {
   };
 
   const progressPercent = progress 
-    ? Math.round((progress.current_index / progress.total) * 100)
+    ? Math.round(((progress.current_index - 1) / Math.max(progress.total, 1)) * 100)
     : 0;
   
   const speed = progress && progress.elapsed_secs > 0
     ? Math.round(progress.bytes_copied / progress.elapsed_secs / 1024 / 1024)
     : 0;
+  
+  // Calculate ETA
+  const remainingBytes = progress ? progress.total_bytes - progress.bytes_copied : 0;
+  const etaSecs = speed > 0 && remainingBytes > 0 ? Math.round(remainingBytes / (speed * 1024 * 1024)) : null;
+  
+  const getStatusText = () => {
+    if (!progress) return 'Preparing...';
+    switch (progress.status) {
+      case 'starting': return 'Preparing files...';
+      case 'processing': return `${operation === 'copy' ? 'Copying' : 'Moving'} file ${progress.current_index} of ${progress.total}`;
+      case 'complete': return 'Complete!';
+      default: return progress.status;
+    }
+  };
 
   if (error) {
     return (
@@ -119,12 +138,21 @@ export default function IngestPage() {
           {isComplete ? 'Ingest Complete' : 'Ingesting...'}
         </h1>
         <p className="text-gray-600 dark:text-gray-400 mt-1">
-          {operation === 'copy' ? 'Copying' : 'Moving'} files to your library
+          {getStatusText()}
         </p>
       </div>
 
       <div className="card p-6 mb-6">
-        <div className="mb-4">
+        {/* Status indicator */}
+        <div className="flex items-center gap-2 mb-4">
+          <div className={`w-3 h-3 rounded-full ${isComplete ? 'bg-green-500' : 'bg-accent animate-pulse'}`} />
+          <span className="text-sm text-gray-600 dark:text-gray-400">
+            {isComplete ? 'All files processed' : 'Processing...'}
+          </span>
+        </div>
+
+        {/* Progress bar */}
+        <div className="mb-6">
           <div className="flex justify-between text-sm mb-2">
             <span className="text-gray-600 dark:text-gray-400">
               {progress?.current_index || 0} of {progress?.total || 0} files
@@ -133,37 +161,71 @@ export default function IngestPage() {
           </div>
           <div className="h-3 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
             <div
-              className="h-full bg-accent transition-all duration-300"
+              className="h-full bg-accent transition-all duration-200"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
         </div>
 
-        <div className="mb-4">
-          <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">Current file</p>
+        {/* Current file */}
+        <div className="mb-6 p-4 bg-gray-50 dark:bg-slate-800 rounded-lg">
+          <div className="flex items-center gap-2 mb-2">
+            <svg className="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Current File</span>
+          </div>
           <p className="font-mono text-sm text-gray-900 dark:text-white truncate" title={progress?.current_file}>
             {progress?.current_file ? getFileName(progress.current_file) : '-'}
           </p>
+          {progress?.current_file && (
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {getFolderName(progress.current_file)}
+            </p>
+          )}
         </div>
 
-        <div className="grid grid-cols-3 gap-4 text-sm">
-          <div>
-            <p className="text-gray-500 dark:text-gray-400">Elapsed</p>
-            <p className="font-medium text-gray-900 dark:text-white">
-              {formatTime(progress?.elapsed_secs || 0)}
+        {/* Stats grid */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="text-center p-3 bg-gray-50 dark:bg-slate-800 rounded-lg">
+            <p className="text-2xl font-bold text-gray-900 dark:text-white">
+              {progress?.current_index || 0}
             </p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">Files Done</p>
           </div>
-          <div>
-            <p className="text-gray-500 dark:text-gray-400">Speed</p>
-            <p className="font-medium text-gray-900 dark:text-white">
-              {speed > 0 ? `${speed} MB/s` : '-'}
-            </p>
-          </div>
-          <div>
-            <p className="text-gray-500 dark:text-gray-400">Processed</p>
-            <p className="font-medium text-gray-900 dark:text-white">
+          <div className="text-center p-3 bg-gray-50 dark:bg-slate-800 rounded-lg">
+            <p className="text-2xl font-bold text-gray-900 dark:text-white">
               {progress ? formatSize(progress.bytes_copied) : '-'}
             </p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">Transferred</p>
+          </div>
+          <div className="text-center p-3 bg-gray-50 dark:bg-slate-800 rounded-lg">
+            <p className="text-2xl font-bold text-gray-900 dark:text-white">
+              {speed > 0 ? `${speed} MB/s` : '-'}
+            </p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">Speed</p>
+          </div>
+          <div className="text-center p-3 bg-gray-50 dark:bg-slate-800 rounded-lg">
+            <p className="text-2xl font-bold text-gray-900 dark:text-white">
+              {etaSecs !== null ? formatTime(etaSecs) : '-'}
+            </p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">ETA</p>
+          </div>
+        </div>
+
+        {/* Elapsed time */}
+        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-slate-700">
+          <div className="flex justify-between text-sm">
+            <span className="text-gray-500 dark:text-gray-400">Total progress</span>
+            <span className="text-gray-900 dark:text-white">
+              {progress ? formatSize(progress.bytes_copied) : '0 B'} / {progress ? formatSize(progress.total_bytes) : '0 B'}
+            </span>
+          </div>
+          <div className="mt-2 h-2 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-green-500 transition-all duration-200"
+              style={{ width: `${progress && progress.total_bytes > 0 ? (progress.bytes_copied / progress.total_bytes) * 100 : 0}%` }}
+            />
           </div>
         </div>
       </div>

@@ -112,11 +112,7 @@ impl Default for Settings {
 #[tauri::command]
 pub async fn scan_source(source: SourcePath) -> Result<SourceScanResult, String> {
     log::info!("Scanning source: {}", source.path);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        crate::ingest::scanner::scan_directory(&source)
-    ).await.map_err(|_| "Scan timed out after 5 minutes".to_string())?;
-    result.map_err(|e| e.to_string())
+    crate::ingest::scanner::scan_directory(&source).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -131,11 +127,7 @@ pub async fn build_ingest_plan(
     options: IngestOptions,
 ) -> Result<IngestPlan, String> {
     log::info!("Building ingest plan for {} sources", sources.len());
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(600),
-        crate::ingest::plan::build_plan(sources, &options)
-    ).await.map_err(|_| "Plan building timed out after 10 minutes".to_string())?;
-    result.map_err(|e| e.to_string())
+    crate::ingest::plan::build_plan(sources, &options).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

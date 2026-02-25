@@ -9,10 +9,22 @@ pub async fn build_plan(
     sources: Vec<SourcePath>,
     options: &IngestOptions,
 ) -> Result<IngestPlan, Box<dyn std::error::Error + Send + Sync>> {
+    let sources_clone = sources.clone();
+    let options_clone = options.clone();
+    
+    tokio::task::spawn_blocking(move || {
+        build_plan_sync(sources_clone, &options_clone)
+    }).await.map_err(|e| e.to_string())?
+}
+
+pub fn build_plan_sync(
+    sources: Vec<SourcePath>,
+    options: &IngestOptions,
+) -> Result<IngestPlan, Box<dyn std::error::Error + Send + Sync>> {
     let mut all_files: Vec<ScannedFile> = Vec::new();
     
     for source in &sources {
-        let result = scanner::scan_directory(source).await?;
+        let result = scanner::scan_directory_sync(source)?;
         all_files.extend(result.files);
     }
     
@@ -32,16 +44,15 @@ pub async fn build_plan(
             .or_else(|| Some(file.modified.clone()));
         
         let device_name = file.device_name.clone()
-            .or_else(|| Some(source_label_from_path(&file.path, &sources)))
+            .or_else(|| Some(scanner::get_source_label(&file.path)))
             .unwrap_or_else(|| "UnknownDevice".to_string());
         
-let date_path = capture_date
-        .as_ref()
-        .and_then(|d| parse_date_for_path(d))
-        .unwrap_or_else(|| {
-            let fallback = &file.modified;
-            parse_date_for_path(fallback).unwrap_or_else(|| "UnknownDate".to_string())
-        });
+        let date_path = capture_date
+            .as_ref()
+            .and_then(|d| parse_date_for_path(d))
+            .unwrap_or_else(|| {
+                parse_date_for_path(&file.modified).unwrap_or_else(|| "UnknownDate".to_string())
+            });
         
         let year = &date_path[0..4];
         let month = &date_path[5..7];
@@ -61,7 +72,7 @@ let date_path = capture_date
         
         let action = if options.skip_duplicates {
             if let Some(ref hash_val) = hash {
-                if let Some(existing) = seen_hashes.get(hash_val) {
+                if seen_hashes.get(hash_val).is_some() {
                     duplicate_count += 1;
                     "skip".to_string()
                 } else {

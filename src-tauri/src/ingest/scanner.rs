@@ -17,7 +17,7 @@ pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box
     }).await.map_err(|e| e.to_string())?
 }
 
-fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(&source.path);
     
     let mut files: Vec<ScannedFile> = Vec::new();
