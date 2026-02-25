@@ -5,25 +5,35 @@ pub async fn extract_metadata(
     file_path: &Path,
     fallback_time: SystemTime,
 ) -> (Option<String>, Option<String>) {
+    let path = file_path.to_path_buf();
+    
+    tokio::task::spawn_blocking(move || {
+        extract_metadata_sync(&path, fallback_time)
+    }).await.unwrap_or((None, None))
+}
+
+pub fn extract_metadata_sync(
+    file_path: &Path,
+    _fallback_time: SystemTime,
+) -> (Option<String>, Option<String>) {
     let extension = file_path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     
     if ["jpg", "jpeg", "png", "arw", "cr2", "nef", "dng"].contains(&extension.as_str()) {
-        return extract_photo_metadata(file_path, fallback_time).await;
+        return extract_photo_metadata_sync(file_path);
     }
     
     if ["mp4", "mov"].contains(&extension.as_str()) {
-        return extract_video_metadata(file_path, fallback_time).await;
+        return extract_video_metadata_sync(file_path);
     }
     
     (None, None)
 }
 
-async fn extract_photo_metadata(
+fn extract_photo_metadata_sync(
     file_path: &Path,
-    fallback_time: SystemTime,
 ) -> (Option<String>, Option<String>) {
     let file = match std::fs::File::open(file_path) {
         Ok(f) => f,
@@ -60,9 +70,8 @@ async fn extract_photo_metadata(
     (capture_date, device_name)
 }
 
-async fn extract_video_metadata(
+fn extract_video_metadata_sync(
     file_path: &Path,
-    fallback_time: SystemTime,
 ) -> (Option<String>, Option<String>) {
     use std::process::Command;
     
@@ -106,7 +115,7 @@ fn parse_exif_datetime(s: &str) -> Option<String> {
     }
     
     let date_part = parts[0].replace(':', "-");
-    let time_part = parts[1];
+    // let time_part = parts[1];
     
     Some(format!("T{}:00", date_part))
 }

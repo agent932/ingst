@@ -1,6 +1,7 @@
 use crate::{ScannedFile, SourcePath, SourceScanResult};
 use chrono::{DateTime, Utc};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
@@ -9,6 +10,14 @@ const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "aac"];
 const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "braw", "r3d", "arw", "cr2", "nef", "dng"];
 
 pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
+    let source = source.clone();
+    
+    tokio::task::spawn_blocking(move || {
+        scan_directory_sync(&source)
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(&source.path);
     
     let mut files: Vec<ScannedFile> = Vec::new();
@@ -60,7 +69,10 @@ pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box
             continue;
         };
         
-        let metadata = entry.metadata()?;
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         let size = metadata.len();
         total_size += size;
         
@@ -74,10 +86,10 @@ pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box
             .ok()
             .map(format_datetime);
         
-        let (capture_date, device_name) = crate::ingest::metadata::extract_metadata(
+        let (capture_date, device_name) = crate::ingest::metadata::extract_metadata_sync(
             file_path,
             modified,
-        ).await;
+        );
         
         let file_name = file_path
             .file_name()
@@ -111,6 +123,14 @@ pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box
 }
 
 pub async fn get_destination_info(path: &str) -> Result<crate::DestInfo, Box<dyn std::error::Error + Send + Sync>> {
+    let path = path.to_string();
+    
+    tokio::task::spawn_blocking(move || {
+        get_destination_info_sync(&path)
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn get_destination_info_sync(path: &str) -> Result<crate::DestInfo, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(path);
     let exists = path.exists();
     
