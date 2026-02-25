@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
+use std::sync::mpsc;
 
 pub async fn execute_plan<F>(
     app: &AppHandle,
@@ -26,8 +27,19 @@ where
     let total = plan.operations.len();
     let total_bytes = plan.total_size;
     
+    // Create channel for progress updates
+    let (progress_tx, progress_rx) = mpsc::channel::<ProgressEvent>();
+    
+    // Spawn a task to receive progress updates and emit them
+    let app_for_receiver = app.clone();
+    let _receiver_handle = tokio::spawn(async move {
+        while let Ok(progress) = progress_rx.recv() {
+            app_for_receiver.emit("ingest-progress", &progress).ok();
+        }
+    });
+    
     // Emit initial progress
-    let progress = ProgressEvent {
+    let _ = progress_tx.send(ProgressEvent {
         current_file: "Starting...".to_string(),
         current_index: 0,
         total,
@@ -35,8 +47,7 @@ where
         total_bytes,
         elapsed_secs: 0,
         status: "starting".to_string(),
-    };
-    app.emit("ingest-progress", &progress).ok();
+    });
     
     for (index, operation) in plan.operations.iter().enumerate() {
         if is_cancelled() {
@@ -45,7 +56,7 @@ where
         }
         
         // Emit progress at start of each file
-        let progress = ProgressEvent {
+        let _ = progress_tx.send(ProgressEvent {
             current_file: operation.source_path.clone(),
             current_index: index + 1,
             total,
@@ -53,8 +64,7 @@ where
             total_bytes,
             elapsed_secs: start_time.elapsed().as_secs(),
             status: "processing".to_string(),
-        };
-        app.emit("ingest-progress", &progress).ok();
+        });
         
         let result = match operation.action.as_str() {
             "skip" => {
@@ -74,15 +84,47 @@ where
             "copy" => {
                 let source = operation.source_path.clone();
                 let dest = operation.dest_path.clone();
+                let tx = progress_tx.clone();
+                let total_files = total;
+                let file_index = index + 1;
+                let total_bytes_copy = total_bytes;
+                
                 tokio::task::spawn_blocking(move || {
-                    copy_file_sync(&source, &dest)
+                    copy_file_with_progress(&source, &dest, |bytesWritten, totalFileSize| {
+                        let progress = ProgressEvent {
+                            current_file: source.clone(),
+                            current_index: file_index,
+                            total: total_files,
+                            bytes_copied: bytesWritten,
+                            total_bytes: total_bytes_copy,
+                            elapsed_secs: 0, // Will be updated in main loop
+                            status: "processing".to_string(),
+                        };
+                        let _ = tx.send(progress);
+                    })
                 }).await.map_err(|e| e.to_string())?
             }
             "move" => {
                 let source = operation.source_path.clone();
                 let dest = operation.dest_path.clone();
+                let tx = progress_tx.clone();
+                let total_files = total;
+                let file_index = index + 1;
+                let total_bytes_copy = total_bytes;
+                
                 tokio::task::spawn_blocking(move || {
-                    move_file_sync(&source, &dest)
+                    move_file_with_progress(&source, &dest, |bytesWritten, _totalFileSize| {
+                        let progress = ProgressEvent {
+                            current_file: source.clone(),
+                            current_index: file_index,
+                            total: total_files,
+                            bytes_copied: bytesWritten,
+                            total_bytes: total_bytes_copy,
+                            elapsed_secs: 0,
+                            status: "processing".to_string(),
+                        };
+                        let _ = tx.send(progress);
+                    })
                 }).await.map_err(|e| e.to_string())?
             }
             _ => Ok(()),
@@ -125,7 +167,7 @@ where
         
         // Emit progress after each file
         let elapsed = start_time.elapsed().as_secs();
-        let progress = ProgressEvent {
+        let _ = progress_tx.send(ProgressEvent {
             current_file: operation.source_path.clone(),
             current_index: index + 1,
             total,
@@ -133,8 +175,7 @@ where
             total_bytes,
             elapsed_secs: elapsed,
             status: "processing".to_string(),
-        };
-        app.emit("ingest-progress", &progress).ok();
+        });
     }
     
     let log_path = crate::ingest::logging::save_log(
@@ -174,7 +215,10 @@ where
     })
 }
 
-fn copy_file_sync(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn copy_file_with_progress<F>(source: &str, dest: &str, mut progress_callback: F) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: FnMut(u64, u64) + Send,
+{
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
     
@@ -182,12 +226,35 @@ fn copy_file_sync(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Er
         std::fs::create_dir_all(parent)?;
     }
     
-    std::fs::copy(source_path, dest_path)?;
+    let total_size = source_path.metadata()?.len();
+    let mut bytes_written: u64 = 0;
+    let chunk_size: u64 = 64 * 1024; // 64KB chunks for more frequent updates
+    
+    let mut source_file = std::fs::File::open(source_path)?;
+    let mut dest_file = std::fs::File::create(dest_path)?;
+    
+    let mut buffer = vec![0u8; chunk_size as usize];
+    
+    loop {
+        let bytes_read = std::io::Read::read(&mut source_file, &mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        
+        std::io::Write::write_all(&mut dest_file, &buffer[..bytes_read])?;
+        bytes_written += bytes_read as u64;
+        
+        // Emit progress after each chunk
+        progress_callback(bytes_written, total_size);
+    }
     
     Ok(())
 }
 
-fn move_file_sync(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn move_file_with_progress<F>(source: &str, dest: &str, mut progress_callback: F) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: FnMut(u64, u64) + Send,
+{
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
     
@@ -195,11 +262,17 @@ fn move_file_sync(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Er
         std::fs::create_dir_all(parent)?;
     }
     
-    std::fs::rename(source_path, dest_path).or_else(|_| {
-        copy_file_sync(source, dest)?;
-        std::fs::remove_file(source_path)?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    })?;
+    let total_size = source_path.metadata().map(|m| m.len()).unwrap_or(0);
+    
+    // Try rename first (fast)
+    if std::fs::rename(source_path, dest_path).is_ok() {
+        progress_callback(total_size, total_size);
+        return Ok(());
+    }
+    
+    // Fall back to copy + delete with progress
+    copy_file_with_progress(source, dest, progress_callback)?;
+    std::fs::remove_file(source_path)?;
     
     Ok(())
 }
