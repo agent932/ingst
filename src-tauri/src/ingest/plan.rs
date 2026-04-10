@@ -46,6 +46,7 @@ pub fn build_plan_sync(
         let device_name = file.device_name.clone()
             .or_else(|| Some(scanner::get_source_label(&file.path)))
             .unwrap_or_else(|| "UnknownDevice".to_string());
+        let device_name = sanitize_device_name(&device_name);
         
         let date_path = capture_date
             .as_ref()
@@ -61,7 +62,13 @@ pub fn build_plan_sync(
             .join(year)
             .join(month)
             .join(&device_name);
-        
+
+        // Guard: reject any path that escapes dest_root after joining.
+        if !dest_dir.starts_with(dest_root) {
+            log::warn!("Skipping file with unsafe dest path: {:?}", dest_dir);
+            continue;
+        }
+
         let dest_path = resolve_collision(&dest_dir, &file.name);
         
         let hash = if options.skip_duplicates {
@@ -97,6 +104,54 @@ pub fn build_plan_sync(
         });
     }
     
+    // Sidecar pass: for each non-skipped file, look for companion files
+    // (.xmp, .srt, .lut, .xml) with the same stem in the same source directory.
+    const SIDECAR_EXTENSIONS: &[&str] = &["xmp", "srt", "lut", "xml", "edl"];
+    let mut sidecar_ops: Vec<IngestOperation> = Vec::new();
+    let ingested_paths: std::collections::HashSet<&str> = operations
+        .iter()
+        .filter(|o| o.action != "skip")
+        .map(|o| o.source_path.as_str())
+        .collect();
+
+    for op in operations.iter().filter(|o| o.action != "skip") {
+        let src = Path::new(&op.source_path);
+        let stem = match src.file_stem().map(|s| s.to_string_lossy().to_lowercase()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let parent = match src.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        let dest_dir = Path::new(&op.dest_path).parent().unwrap_or(dest_root);
+
+        for ext in SIDECAR_EXTENSIONS {
+            // Try both lower and upper case extensions.
+            for case_ext in &[ext.to_string(), ext.to_uppercase()] {
+                let candidate = parent.join(format!("{}.{}", stem, case_ext));
+                let candidate_str = candidate.to_string_lossy().to_string();
+                if candidate.exists() && !ingested_paths.contains(candidate_str.as_str()) {
+                    let sidecar_name = candidate.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let sidecar_dest = resolve_collision(dest_dir, &sidecar_name);
+                    let sidecar_size = candidate.metadata().map(|m| m.len()).unwrap_or(0);
+                    sidecar_ops.push(IngestOperation {
+                        source_path: candidate_str,
+                        dest_path: sidecar_dest.to_string_lossy().to_string(),
+                        action: "copy".to_string(), // always copy sidecars
+                        size: sidecar_size,
+                        capture_date: op.capture_date.clone(),
+                        device_name: op.device_name.clone(),
+                        hash: None,
+                    });
+                }
+            }
+        }
+    }
+    operations.extend(sidecar_ops);
+
     let total_files = operations.iter().filter(|o| o.action != "skip").count();
     let total_size: u64 = operations
         .iter()
@@ -119,13 +174,23 @@ pub fn build_plan_sync(
     })
 }
 
-fn source_label_from_path(path: &str, sources: &[SourcePath]) -> String {
-    for source in sources {
-        if path.starts_with(&source.path) {
-            return source.label.clone();
-        }
+/// Strip characters from a camera/device name that are unsafe in file paths.
+/// Keeps alphanumeric, spaces, hyphens, and underscores; collapses runs of
+/// spaces; falls back to "UnknownDevice" if nothing remains.
+fn sanitize_device_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if sanitized.is_empty() {
+        "UnknownDevice".to_string()
+    } else {
+        sanitized
     }
-    "UnknownDevice".to_string()
 }
 
 pub fn parse_date_for_path(date_str: &str) -> Option<String> {

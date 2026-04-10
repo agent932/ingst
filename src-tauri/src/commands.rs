@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::AppHandle;
 
 static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
+static PAUSE_FLAG: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourcePath {
@@ -139,13 +139,19 @@ pub async fn execute_ingest(
     options: IngestOptions,
 ) -> Result<IngestResult, String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
+    PAUSE_FLAG.store(false, Ordering::SeqCst);
     log::info!("Executing ingest plan with {} operations", plan.operations.len());
-    
-    let result = crate::ingest::executor::execute_plan(&app, &plan, &options, || {
-        CANCEL_FLAG.load(Ordering::SeqCst)
-    }).await;
-    
+
+    let result = crate::ingest::executor::execute_plan(
+        &app,
+        &plan,
+        &options,
+        || CANCEL_FLAG.load(Ordering::SeqCst),
+        || PAUSE_FLAG.load(Ordering::SeqCst),
+    ).await;
+
     CANCEL_FLAG.store(false, Ordering::SeqCst);
+    PAUSE_FLAG.store(false, Ordering::SeqCst);
     result.map_err(|e| e.to_string())
 }
 
@@ -153,6 +159,21 @@ pub async fn execute_ingest(
 pub fn cancel_ingest() -> Result<(), String> {
     log::info!("Cancel requested");
     CANCEL_FLAG.store(true, Ordering::SeqCst);
+    PAUSE_FLAG.store(false, Ordering::SeqCst); // unblock any pause so the loop can exit
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pause_ingest() -> Result<(), String> {
+    log::info!("Pause requested");
+    PAUSE_FLAG.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn resume_ingest() -> Result<(), String> {
+    log::info!("Resume requested");
+    PAUSE_FLAG.store(false, Ordering::SeqCst);
     Ok(())
 }
 
@@ -202,6 +223,7 @@ pub struct MountedVolume {
 pub fn get_mounted_volumes() -> Result<Vec<MountedVolume>, String> {
     #[cfg(target_os = "macos")]
     {
+        use std::path::PathBuf;
         use std::process::Command;
         
         let output = Command::new("diskutil")

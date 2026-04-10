@@ -7,6 +7,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
+    pub timestamp: String,
     pub source_path: String,
     pub dest_path: String,
     pub size: u64,
@@ -44,6 +45,7 @@ pub fn create_log_entry(
     error: Option<String>,
 ) -> LogEntry {
     LogEntry {
+        timestamp: Utc::now().to_rfc3339(),
         source_path: source_path.to_string(),
         dest_path: dest_path.to_string(),
         size,
@@ -85,10 +87,44 @@ pub fn save_log(
     
     let json = serde_json::to_string_pretty(&log)?;
     fs::write(&log_file, json)?;
-    
+
     log::info!("Log saved to {:?}", log_file);
-    
+
+    rotate_logs(&log_dir);
+
+
     Ok(log_file.to_string_lossy().to_string())
+}
+
+/// Keep only the most recent MAX_LOGS log files; delete the rest.
+fn rotate_logs(log_dir: &Path) {
+    const MAX_LOGS: usize = 50;
+
+    let mut log_files: Vec<_> = match fs::read_dir(log_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| {
+                e.path().extension().map(|x| x == "json").unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => return,
+    };
+
+    if log_files.len() <= MAX_LOGS {
+        return;
+    }
+
+    // Sort by file name (which starts with ingst_YYYYMMDD_HHMMSS, so lexicographic = chronological).
+    log_files.sort_by_key(|e| e.file_name());
+
+    let to_delete = log_files.len() - MAX_LOGS;
+    for entry in log_files.iter().take(to_delete) {
+        if let Err(e) = fs::remove_file(entry.path()) {
+            log::warn!("Failed to delete old log {:?}: {}", entry.path(), e);
+        } else {
+            log::info!("Rotated old log: {:?}", entry.path());
+        }
+    }
 }
 
 pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, String> {

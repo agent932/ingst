@@ -1,7 +1,6 @@
 use crate::{ScannedFile, SourcePath, SourceScanResult};
 use chrono::{DateTime, Utc};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
@@ -19,23 +18,36 @@ pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box
 
 pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(&source.path);
-    
+
+    // Canonicalize the source root so symlink targets can be safely compared.
+    let canonical_root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
     let mut files: Vec<ScannedFile> = Vec::new();
     let mut video_count = 0;
     let mut photo_count = 0;
     let mut audio_count = 0;
     let mut other_count = 0;
     let mut total_size: u64 = 0;
-    
+
     let exclusions: Vec<String> = source.exclusions.iter()
         .map(|e| e.to_lowercase())
         .collect();
-    
+
     for entry in WalkDir::new(path)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        // Symlink guard: reject any entry whose resolved path escapes the source root.
+        if entry.path_is_symlink() {
+            match entry.path().canonicalize() {
+                Ok(real_path) if real_path.starts_with(&canonical_root) => {}
+                _ => {
+                    log::warn!("Skipping symlink that escapes source root: {:?}", entry.path());
+                    continue;
+                }
+            }
+        }
         if entry.file_type().is_dir() {
             let dir_name = entry.file_name().to_string_lossy().to_lowercase();
             if exclusions.iter().any(|e| dir_name.contains(e)) {

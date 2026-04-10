@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useStore, Source } from '../store/useStore';
+import { formatSize } from '../utils/formatters';
 
 interface SourceScanResult {
   source: Source;
@@ -21,13 +22,6 @@ interface MountedVolume {
   free_space: number;
 }
 
-function formatSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
 
 export default function SourcesPage() {
   const { sources, addSource, removeSource, isScanning, setIsScanning, nextStep } = useStore();
@@ -56,7 +50,7 @@ export default function SourcesPage() {
     setIsScanning(true);
     setError(null);
 
-    const label = path.split('/').pop() || 'Unknown';
+    const label = path.split(/[\\/]/).pop() || 'Unknown';
 
     const source: Source = {
       path,

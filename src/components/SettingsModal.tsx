@@ -1,4 +1,5 @@
 import { useStore } from '../store/useStore';
+import { version } from '../../package.json';
 
 export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const { theme, setTheme, operation, setOperation, skipDuplicates, setSkipDuplicates } = useStore();
@@ -97,7 +98,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
 
         <div className="mt-6 pt-4 border-t border-gray-200 dark:border-slate-700">
           <p className="text-xs text-center text-gray-500 dark:text-gray-400">
-            Ingst v0.1.0 — Made for creators
+            Ingst v{version} — Made for creators
           </p>
         </div>
       </div>

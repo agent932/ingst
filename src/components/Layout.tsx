@@ -12,8 +12,26 @@ const steps = [
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { currentStep, setCurrentStep, theme, setTheme } = useStore();
+  const { currentStep, setCurrentStep, theme, setTheme, sources, destination, ingestPlan, ingestResult } = useStore();
   const [showSettings, setShowSettings] = useState(false);
+
+  const hasSources = sources.length > 0;
+  const hasDest = destination !== '';
+  const hasPlan = ingestPlan !== null;
+  const hasResult = ingestResult !== null;
+
+  // A step is reachable if its prerequisites are met OR the user has already been there.
+  function isStepReachable(stepNumber: number): boolean {
+    switch (stepNumber) {
+      case 1: return true;
+      case 2: return hasSources;
+      case 3: return hasSources && hasDest;
+      case 4: return hasSources && hasDest;
+      case 5: return hasPlan;
+      case 6: return hasResult;
+      default: return false;
+    }
+  }
 
   return (
     <div className="flex flex-col h-full bg-background-light dark:bg-background-dark">
@@ -32,6 +50,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-slate-800 text-gray-600 dark:text-gray-300"
             title={`Theme: ${theme}`}
+            aria-label={`Switch theme (current: ${theme})`}
           >
             {theme === 'dark' ? (
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -52,6 +71,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             onClick={() => setShowSettings(true)}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-slate-800 text-gray-600 dark:text-gray-300"
             title="Settings"
+            aria-label="Open settings"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -67,9 +87,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             {steps.map((step) => (
               <li key={step.number}>
                 <button
-                  onClick={() => setCurrentStep(step.number)}
+                  onClick={() => isStepReachable(step.number) && setCurrentStep(step.number)}
+                  disabled={!isStepReachable(step.number)}
                   className={`step-item w-full text-left ${
-                    currentStep === step.number
+                    !isStepReachable(step.number)
+                      ? 'opacity-40 cursor-not-allowed'
+                      : currentStep === step.number
                       ? 'step-item-active'
                       : currentStep > step.number
                       ? 'step-item-complete'

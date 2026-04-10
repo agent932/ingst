@@ -2,14 +2,8 @@ import { useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useStore, IngestResult, ProgressEvent } from '../store/useStore';
+import { formatSize } from '../utils/formatters';
 
-function formatSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
 
 function formatTime(secs: number): string {
   const hours = Math.floor(secs / 3600);
@@ -47,6 +41,7 @@ export default function IngestPage() {
   
   const [error, setError] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const lastProgressRef = useRef<ProgressEvent | null>(null);
   const lastUpdateRef = useRef<number>(0);
 
@@ -105,6 +100,20 @@ export default function IngestPage() {
     }
   };
 
+  const handlePauseResume = async () => {
+    try {
+      if (isPaused) {
+        await invoke('resume_ingest');
+        setIsPaused(false);
+      } else {
+        await invoke('pause_ingest');
+        setIsPaused(true);
+      }
+    } catch (e) {
+      console.error('Failed to pause/resume:', e);
+    }
+  };
+
   const progressPercent = progress 
     ? Math.round(((progress.current_index - 1) / Math.max(progress.total, 1)) * 100)
     : 0;
@@ -158,12 +167,23 @@ export default function IngestPage() {
         </p>
       </div>
 
+      {/* Live region for screen readers */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {isComplete
+          ? 'Ingest complete.'
+          : isPaused
+          ? 'Ingest paused.'
+          : progress
+          ? `${progress.current_index} of ${progress.total} files processed, ${progressPercent} percent complete.`
+          : 'Preparing ingest...'}
+      </div>
+
       <div className="card p-6 mb-6">
         {/* Status indicator */}
         <div className="flex items-center gap-2 mb-4">
-          <div className={`w-3 h-3 rounded-full ${isComplete ? 'bg-green-500' : 'bg-accent animate-pulse'}`} />
+          <div className={`w-3 h-3 rounded-full ${isComplete ? 'bg-green-500' : isPaused ? 'bg-yellow-500' : 'bg-accent animate-pulse'}`} />
           <span className="text-sm text-gray-600 dark:text-gray-400">
-            {isComplete ? 'All files processed' : 'Processing...'}
+            {isComplete ? 'All files processed' : isPaused ? 'Paused' : 'Processing...'}
           </span>
         </div>
 
@@ -267,7 +287,13 @@ export default function IngestPage() {
       </div>
 
       {!isComplete && isIngesting && (
-        <div className="flex justify-center">
+        <div className="flex justify-center gap-3">
+          <button
+            onClick={handlePauseResume}
+            className="btn btn-secondary"
+          >
+            {isPaused ? 'Resume' : 'Pause'}
+          </button>
           <button
             onClick={handleCancel}
             className="btn btn-secondary text-red-600 dark:text-red-400"

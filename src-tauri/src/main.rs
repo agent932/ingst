@@ -22,6 +22,8 @@ fn main() {
             ingst_lib::commands::build_ingest_plan,
             ingst_lib::commands::execute_ingest,
             ingst_lib::commands::cancel_ingest,
+            ingst_lib::commands::pause_ingest,
+            ingst_lib::commands::resume_ingest,
             ingst_lib::commands::get_settings,
             ingst_lib::commands::save_settings,
             ingst_lib::commands::get_mounted_volumes,

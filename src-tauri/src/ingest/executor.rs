@@ -7,14 +7,16 @@ use tauri::{AppHandle, Emitter};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-pub async fn execute_plan<F>(
+pub async fn execute_plan<F, P>(
     app: &AppHandle,
     plan: &IngestPlan,
     options: &IngestOptions,
     is_cancelled: F,
+    is_paused: P,
 ) -> Result<IngestResult, Box<dyn std::error::Error + Send + Sync>>
 where
     F: Fn() -> bool + Send + Sync,
+    P: Fn() -> bool + Send + Sync,
 {
     let start_time = Instant::now();
     let mut success_count = 0;
@@ -61,7 +63,15 @@ where
             log::info!("Ingest cancelled by user");
             break;
         }
-        
+
+        // Wait while paused (checks cancel so a cancel during pause still exits).
+        while is_paused() && !is_cancelled() {
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+        if is_cancelled() {
+            break;
+        }
+
         // Reset current file bytes
         current_file_bytes.store(0, Ordering::SeqCst);
         should_emit_progress.store(false, Ordering::SeqCst);
@@ -82,7 +92,7 @@ where
         let result = match operation.action.as_str() {
             "skip" => {
                 skipped_count += 1;
-                log_entries.lock().unwrap().push(create_log_entry(
+                log_entries.lock().unwrap_or_else(|e| e.into_inner()).push(create_log_entry(
                     &operation.source_path,
                     &operation.dest_path,
                     operation.size,
@@ -99,10 +109,12 @@ where
                 let dest = operation.dest_path.clone();
                 let bytes_tracker = current_file_bytes.clone();
                 let emit_flag = should_emit_progress.clone();
-                let file_size = operation.size;
-                
+                let source2 = source.clone();
+                let dest2 = dest.clone();
+
                 tokio::task::spawn_blocking(move || {
-                    copy_file_with_progress(&source, &dest, bytes_tracker, emit_flag)
+                    copy_file_with_progress(&source, &dest, bytes_tracker, emit_flag)?;
+                    verify_copy(&source2, &dest2)
                 }).await.map_err(|e| e.to_string())?
             }
             "move" => {
@@ -123,7 +135,7 @@ where
                 success_count += 1;
                 bytes_copied += operation.size;
                 
-                log_entries.lock().unwrap().push(create_log_entry(
+                log_entries.lock().unwrap_or_else(|e| e.into_inner()).push(create_log_entry(
                     &operation.source_path,
                     &operation.dest_path,
                     operation.size,
@@ -137,10 +149,10 @@ where
             Err(e) => {
                 error_count += 1;
                 let error_msg = format!("{}: {}", operation.source_path, e);
-                errors.lock().unwrap().push(error_msg.clone());
+                errors.lock().unwrap_or_else(|e| e.into_inner()).push(error_msg.clone());
                 log::error!("Error processing file: {}", error_msg);
                 
-                log_entries.lock().unwrap().push(create_log_entry(
+                log_entries.lock().unwrap_or_else(|e| e.into_inner()).push(create_log_entry(
                     &operation.source_path,
                     &operation.dest_path,
                     operation.size,
@@ -172,7 +184,7 @@ where
         &options.dest_root,
         &plan.operations.iter().map(|o| o.source_path.clone()).collect::<Vec<_>>(),
         options,
-        &log_entries.lock().unwrap(),
+        &log_entries.lock().unwrap_or_else(|e| e.into_inner()),
     )?;
     
     let final_progress = ProgressEvent {
@@ -196,7 +208,7 @@ where
         error_count
     );
     
-    let final_errors = errors.lock().unwrap().clone();
+    let final_errors = errors.lock().unwrap_or_else(|e| e.into_inner()).clone();
     
     Ok(IngestResult {
         success_count,
@@ -205,6 +217,22 @@ where
         errors: final_errors,
         log_path,
     })
+}
+
+/// Verify a copy by comparing SHA256 of source and destination.
+/// Removes the destination file if hashes don't match.
+fn verify_copy(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let src_hash = crate::utils::hashing::full_hash(source)?;
+    let dst_hash = crate::utils::hashing::full_hash(dest)?;
+    if src_hash != dst_hash {
+        // Remove the corrupt destination before returning error.
+        let _ = std::fs::remove_file(dest);
+        return Err(format!(
+            "Checksum mismatch after copy — source: {} dest: {}",
+            src_hash, dst_hash
+        ).into());
+    }
+    Ok(())
 }
 
 fn copy_file_with_progress(
@@ -220,9 +248,8 @@ fn copy_file_with_progress(
         std::fs::create_dir_all(parent)?;
     }
     
-    let total_size = source_path.metadata()?.len();
     let mut bytes_written: u64 = 0;
-    let chunk_size: u64 = 64 * 1024; // 64KB chunks
+    let chunk_size: u64 = 4 * 1024 * 1024; // 4MB chunks for large video files
     
     let mut source_file = std::fs::File::open(source_path)?;
     let mut dest_file = std::fs::File::create(dest_path)?;
@@ -258,17 +285,18 @@ fn move_file_with_progress(
         std::fs::create_dir_all(parent)?;
     }
     
-    let total_size = source_path.metadata().map(|m| m.len()).unwrap_or(0);
-    
     // Try rename first (fast)
     if std::fs::rename(source_path, dest_path).is_ok() {
-        bytes_tracker.store(total_size, Ordering::SeqCst);
+        let size = source_path.metadata().map(|m| m.len()).unwrap_or(0);
+        bytes_tracker.store(size, Ordering::SeqCst);
         return Ok(());
     }
     
     // Fall back to copy + delete with progress
     copy_file_with_progress(source, dest, bytes_tracker, _emit_flag)?;
+    // Verify before deleting the original — if corrupt, source is preserved.
+    verify_copy(source, dest)?;
     std::fs::remove_file(source_path)?;
-    
+
     Ok(())
 }

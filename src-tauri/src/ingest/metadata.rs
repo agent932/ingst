@@ -115,7 +115,7 @@ fn parse_exif_datetime(s: &str) -> Option<String> {
     }
     
     let date_part = parts[0].replace(':', "-");
-    // let time_part = parts[1];
-    
-    Some(format!("T{}:00", date_part))
+    let time_part = parts[1];
+
+    Some(format!("{}T{}", date_part, time_part))
 }
