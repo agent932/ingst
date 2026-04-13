@@ -27,6 +27,7 @@ fn main() {
             ingst_lib::commands::get_settings,
             ingst_lib::commands::save_settings,
             ingst_lib::commands::get_mounted_volumes,
+            ingst_lib::commands::get_thumbnail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

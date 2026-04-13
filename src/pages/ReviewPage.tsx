@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore, IngestPlan } from '../store/useStore';
 import { formatSize } from '../utils/formatters';
@@ -8,12 +8,72 @@ function getFileName(path: string): string {
   return path.split('/').pop() || path;
 }
 
+function getFileType(path: string): string {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  if (['mp4', 'mov', 'mxf', 'avi', 'mkv'].includes(ext)) return 'video';
+  if (['wav', 'mp3', 'aac'].includes(ext)) return 'audio';
+  return 'photo';
+}
+
+const THUMB_BATCH = 8;
+
+function FileTypeIcon({ fileType }: { fileType: string }) {
+  if (fileType === 'video') {
+    return (
+      <svg className="w-6 h-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+          d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+      </svg>
+    );
+  }
+  if (fileType === 'audio') {
+    return (
+      <svg className="w-6 h-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+          d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+      </svg>
+    );
+  }
+  // photo / RAW
+  return (
+    <svg className="w-6 h-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+        d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+    </svg>
+  );
+}
+
+function Thumbnail({ src, fileType }: { src: string | null | undefined; fileType: string }) {
+  if (src === undefined) {
+    // still loading
+    return <div className="w-10 h-10 rounded bg-gray-200 dark:bg-slate-700 animate-pulse" />;
+  }
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        className="w-10 h-10 rounded object-cover"
+      />
+    );
+  }
+  // null → unsupported, show icon
+  return (
+    <div className="w-10 h-10 rounded bg-gray-100 dark:bg-slate-800 flex items-center justify-center">
+      <FileTypeIcon fileType={fileType} />
+    </div>
+  );
+}
+
 export default function ReviewPage() {
   const { sources, destination, operation, skipDuplicates, setIngestPlan, nextStep, prevStep } = useStore();
   const [isBuilding, setIsBuilding] = useState(false);
   const [plan, setPlan] = useState<IngestPlan | null>(null);
   const [filter, setFilter] = useState<'all' | 'unknown' | 'duplicates'>('all');
   const [error, setError] = useState<string | null>(null);
+  // undefined = loading, null = unsupported/failed, string = data URL
+  const [thumbnails, setThumbnails] = useState<Map<string, string | null>>(new Map());
+  const thumbLoadRef = useRef(false);
 
   useEffect(() => {
     buildPlan();
@@ -45,6 +105,31 @@ export default function ReviewPage() {
       setIsBuilding(false);
     }
   };
+
+  useEffect(() => {
+    if (!plan || thumbLoadRef.current) return;
+    thumbLoadRef.current = true;
+
+    const paths = plan.operations
+      .slice(0, 100)
+      .map(op => op.source_path);
+
+    (async () => {
+      for (let i = 0; i < paths.length; i += THUMB_BATCH) {
+        const batch = paths.slice(i, i + THUMB_BATCH);
+        await Promise.all(
+          batch.map(async (path) => {
+            try {
+              const thumb = await invoke<string | null>('get_thumbnail', { path });
+              setThumbnails(prev => new Map(prev).set(path, thumb));
+            } catch {
+              setThumbnails(prev => new Map(prev).set(path, null));
+            }
+          })
+        );
+      }
+    })();
+  }, [plan]);
 
   const filteredOperations = plan?.operations.filter(op => {
     if (filter === 'unknown') {
@@ -153,6 +238,7 @@ export default function ReviewPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-slate-800 sticky top-0">
               <tr>
+                <th className="px-3 py-3 w-14" />
                 <th className="px-4 py-3 text-left text-gray-500 dark:text-gray-400 font-medium">Source</th>
                 <th className="px-4 py-3 text-left text-gray-500 dark:text-gray-400 font-medium">Capture Date</th>
                 <th className="px-4 py-3 text-left text-gray-500 dark:text-gray-400 font-medium">Device</th>
@@ -163,6 +249,9 @@ export default function ReviewPage() {
             <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
               {filteredOperations.slice(0, 100).map((op, idx) => (
                 <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-slate-800/50">
+                  <td className="px-3 py-2">
+                    <Thumbnail src={thumbnails.get(op.source_path)} fileType={getFileType(op.source_path)} />
+                  </td>
                   <td className="px-4 py-3 font-mono text-xs truncate max-w-[200px]" title={op.source_path}>
                     {getFileName(op.source_path)}
                   </td>

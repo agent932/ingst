@@ -9,57 +9,142 @@ permissions:
   contents: write
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  # ── Create a draft release so both build jobs can upload to it ─────────────
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Ingst ${tag}`,
+              body: 'See the assets below to download the installer for your platform.',
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  # ── macOS (Apple Silicon) ───────────────────────────────────────────────────
+  build-macos:
+    needs: create-release
+    runs-on: macos-latest   # macos-14, arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
-      - name: Import Apple Certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Download ffmpeg (arm64)
         run: |
-          # Create variables
-          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          
-          # Decode certificate
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
-          
-          # Create keychain
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          
-          # Import certificate
-          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-          
-          # Apply to system
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" -D "" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" -D "" $KEYCHAIN_PATH
+          brew install ffmpeg
+          mkdir -p src-tauri/binaries
+          cp "$(which ffprobe)" src-tauri/binaries/ffprobe-aarch64-apple-darwin
+          cp "$(which ffmpeg)"  src-tauri/binaries/ffmpeg-aarch64-apple-darwin
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Enable externalBin in tauri.conf.json
+        run: |
+          jq '.bundle.externalBin = ["binaries/ffprobe", "binaries/ffmpeg"]' \
+            src-tauri/tauri.conf.json > /tmp/tauri.conf.json
+          mv /tmp/tauri.conf.json src-tauri/tauri.conf.json
 
-      - name: Install dependencies
+      - name: Install JS dependencies
         run: npm ci
 
-      - name: Build Tauri
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN:                ${{ secrets.GITHUB_TOKEN }}
+          # Code-signing (optional — skip if secrets are not configured)
+          APPLE_CERTIFICATE:           ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD:  ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY:      ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Notarization (optional)
+          APPLE_ID:                    ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD:              ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID:               ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+
+  # ── Windows (x86-64) ────────────────────────────────────────────────────────
+  build-windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Download ffmpeg (Windows x86-64)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          $binDir = (Get-ChildItem ffmpeg-tmp -Recurse -Directory -Filter bin |
+                     Select-Object -First 1).FullName
+          New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
+          Copy-Item "$binDir\ffprobe.exe" "src-tauri\binaries\ffprobe-x86_64-pc-windows-msvc.exe"
+          Copy-Item "$binDir\ffmpeg.exe"  "src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe"
+
+      - name: Enable externalBin in tauri.conf.json
+        shell: pwsh
+        run: |
+          $conf = Get-Content src-tauri\tauri.conf.json | ConvertFrom-Json
+          $conf.bundle | Add-Member -Force -NotePropertyName externalBin `
+            -NotePropertyValue @('binaries/ffprobe', 'binaries/ffmpeg')
+          $conf | ConvertTo-Json -Depth 10 | Set-Content src-tauri\tauri.conf.json
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Ingst v${{ github.ref_name }}'
-          releaseBody: 'Media ingestion app for creators'
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+
+  # ── Publish once both builds succeed ───────────────────────────────────────
+  publish-release:
+    needs: [create-release, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: process.env.RELEASE_ID,
+              draft: false,
+            });

@@ -25,7 +25,7 @@ pub fn extract_metadata_sync(
         return extract_photo_metadata_sync(file_path);
     }
     
-    if ["mp4", "mov"].contains(&extension.as_str()) {
+    if ["mp4", "mov", "mxf", "avi", "mkv"].contains(&extension.as_str()) {
         return extract_video_metadata_sync(file_path);
     }
     
@@ -74,8 +74,8 @@ fn extract_video_metadata_sync(
     file_path: &Path,
 ) -> (Option<String>, Option<String>) {
     use std::process::Command;
-    
-    let output = Command::new("ffprobe")
+
+    let output = Command::new(crate::utils::paths::ffprobe_path())
         .arg("-v")
         .arg("quiet")
         .arg("-print_format")

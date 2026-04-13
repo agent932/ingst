@@ -219,6 +219,72 @@ pub struct MountedVolume {
     pub free_space: u64,
 }
 
+/// Returns a base64 `data:image/jpeg;base64,…` thumbnail for JPEG/PNG files,
+/// or `null` for unsupported types (RAW, video, etc.).
+#[tauri::command]
+pub async fn get_thumbnail(path: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || generate_thumbnail(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn generate_thumbnail(path: &str) -> Result<Option<String>, String> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" => generate_photo_thumbnail(path),
+        "mp4" | "mov" | "mxf" | "avi" | "mkv" => generate_video_thumbnail(path),
+        _ => Ok(None),
+    }
+}
+
+fn generate_photo_thumbnail(path: &str) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose, Engine as _};
+    use std::io::Cursor;
+
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let thumb = img.thumbnail(160, 160);
+
+    let mut buf: Vec<u8> = Vec::new();
+    thumb
+        .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+
+    let b64 = general_purpose::STANDARD.encode(&buf);
+    Ok(Some(format!("data:image/jpeg;base64,{}", b64)))
+}
+
+fn generate_video_thumbnail(path: &str) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    // Seek 1 second in, grab one frame, scale to 160px wide, emit as MJPEG on stdout.
+    // The seek is placed before -i for fast keyframe seek; if the clip is shorter
+    // than 1s ffmpeg will output nothing and we return None gracefully.
+    let output = std::process::Command::new(crate::utils::paths::ffmpeg_path())
+        .args([
+            "-ss", "1",
+            "-i", path,
+            "-vframes", "1",
+            "-vf", "scale=160:-2",
+            "-f", "mjpeg",
+            "-loglevel", "error",
+            "pipe:1",
+        ])
+        .output();
+
+    match output {
+        Ok(out) if !out.stdout.is_empty() => {
+            let b64 = general_purpose::STANDARD.encode(&out.stdout);
+            Ok(Some(format!("data:image/jpeg;base64,{}", b64)))
+        }
+        // ffmpeg not available or clip too short — fall back to icon
+        _ => Ok(None),
+    }
+}
+
 #[tauri::command]
 pub fn get_mounted_volumes() -> Result<Vec<MountedVolume>, String> {
     #[cfg(target_os = "macos")]

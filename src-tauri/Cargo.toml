@@ -29,3 +29,5 @@ log = "0.4"
 thiserror = "2"
 kamadak-exif = "0.5"
 dirs = "5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
