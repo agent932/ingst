@@ -269,3 +269,270 @@ pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, IndexEntry> {
     );
     hashes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn entry(status: &str, hash: Option<&str>, dest: &str) -> LogEntry {
+        LogEntry {
+            timestamp: "2026-07-23T07:30:20+00:00".to_string(),
+            source_path: format!("/Volumes/CARD/{}", dest),
+            dest_path: format!("/library/2026/07/Card/{}", dest),
+            size: 1024,
+            hash: hash.map(|h| h.to_string()),
+            capture_datetime: Some("2026-07-23T07:30:20".to_string()),
+            device_name: "Card".to_string(),
+            status: status.to_string(),
+            error: None,
+        }
+    }
+
+    /// The index is the only memory the app has of what it already imported.
+    /// Recording a *failed* copy would make the next run skip that file as a
+    /// duplicate — the footage never lands in the library, and the user
+    /// reformats the card believing it did.
+    #[test]
+    fn hash_index_records_only_files_that_are_really_in_the_library() {
+        let root = tmpdir("ingst_log_index_status");
+        let dest_root = root.to_string_lossy().to_string();
+
+        let entries = vec![
+            entry("success", Some("hash-copied"), "a.mp4"),
+            entry("skipped", Some("hash-already-there"), "b.mp4"),
+            entry("error", Some("hash-failed"), "c.mp4"),
+            entry("success", None, "d.mp4"),
+        ];
+
+        update_hash_index(&dest_root, &entries).unwrap();
+        let loaded = load_existing_hashes(&dest_root);
+
+        assert!(loaded.contains_key("hash-copied"), "a copied file must be remembered");
+        assert!(
+            loaded.contains_key("hash-already-there"),
+            "a file skipped as an existing duplicate is still in the library"
+        );
+        assert!(
+            !loaded.contains_key("hash-failed"),
+            "a failed copy must NOT be remembered, or the retry gets skipped"
+        );
+        assert_eq!(loaded.len(), 2);
+
+        assert!(
+            !root.join(".ingst").join("index.json.tmp").exists(),
+            "the write-then-rename temp file must not survive"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Each ingest must add to the index, not replace it. If run two wiped the
+    /// memory of run one, every earlier file would be re-imported on the next
+    /// pass and the library would fill with duplicates.
+    #[test]
+    fn hash_index_merges_across_runs() {
+        let root = tmpdir("ingst_log_index_merge");
+        let dest_root = root.to_string_lossy().to_string();
+
+        update_hash_index(&dest_root, &[entry("success", Some("run-one"), "a.mp4")]).unwrap();
+        update_hash_index(&dest_root, &[entry("success", Some("run-two"), "b.mp4")]).unwrap();
+
+        let loaded = load_existing_hashes(&dest_root);
+        assert!(loaded.contains_key("run-one"), "the earlier run was forgotten");
+        assert!(loaded.contains_key("run-two"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Libraries created before the index existed only have logs. Those hashes
+    /// must still be recovered, otherwise the first run after an upgrade
+    /// re-copies the entire library.
+    #[test]
+    fn hashes_are_recovered_from_logs_when_the_index_is_missing() {
+        let root = tmpdir("ingst_log_recover");
+        let dest_root = root.to_string_lossy().to_string();
+        let log_dir = root.join(".ingst").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let log = IngestLog {
+            app_version: "0.0.1".to_string(),
+            timestamp: "2026-07-23T07:30:20+00:00".to_string(),
+            sources: vec!["/Volumes/CARD".to_string()],
+            options: IngestOptionsLog {
+                operation: "copy".to_string(),
+                skip_duplicates: true,
+                dest_root: dest_root.clone(),
+            },
+            entries: vec![
+                entry("success", Some("only-in-the-log"), "old.mp4"),
+                entry("error", Some("failed-in-the-log"), "bad.mp4"),
+            ],
+        };
+        fs::write(
+            log_dir.join("ingst_20260101_000000.json"),
+            serde_json::to_string(&log).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            !root.join(".ingst").join("index.json").exists(),
+            "precondition: no index yet"
+        );
+
+        let loaded = load_existing_hashes(&dest_root);
+        assert!(
+            loaded.contains_key("only-in-the-log"),
+            "pre-index ingests must still be recognised as already imported"
+        );
+        assert!(
+            !loaded.contains_key("failed-in-the-log"),
+            "a failed entry in an old log is not proof the file is in the library"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A hash present in both places must keep the index's value: the index
+    /// stores where the file landed in the library, the log fallback only the
+    /// card path it came from, and the card is gone by the next run.
+    #[test]
+    fn the_index_wins_over_a_log_for_the_same_hash() {
+        let root = tmpdir("ingst_log_index_precedence");
+        let dest_root = root.to_string_lossy().to_string();
+        let log_dir = root.join(".ingst").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let shared = entry("success", Some("same-hash"), "clip.mp4");
+        update_hash_index(&dest_root, std::slice::from_ref(&shared)).unwrap();
+
+        let log = IngestLog {
+            app_version: "0.0.1".to_string(),
+            timestamp: shared.timestamp.clone(),
+            sources: vec![],
+            options: IngestOptionsLog {
+                operation: "copy".to_string(),
+                skip_duplicates: true,
+                dest_root: dest_root.clone(),
+            },
+            entries: vec![shared.clone()],
+        };
+        fs::write(
+            log_dir.join("ingst_20260101_000000.json"),
+            serde_json::to_string(&log).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_existing_hashes(&dest_root);
+        assert_eq!(
+            loaded.get("same-hash").map(String::as_str),
+            Some(shared.dest_path.as_str()),
+            "the library location must not be overwritten by the source path"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Rotation must delete the *oldest* logs. Deleting the newest would throw
+    /// away the record of the ingest that just happened — the only audit trail
+    /// of where each file went, and the dedup fallback for pre-index libraries.
+    #[test]
+    fn rotate_logs_keeps_the_newest_fifty() {
+        const MAX_LOGS: usize = 50; // mirrors the constant inside rotate_logs
+        let log_dir = tmpdir("ingst_log_rotate");
+
+        // 55 logs, named the way save_log names them (lexicographic = chronological).
+        for i in 1..=55 {
+            fs::write(
+                log_dir.join(format!("ingst_20260101_{:06}.json", i)),
+                "{}",
+            )
+            .unwrap();
+        }
+        fs::write(log_dir.join("notes.txt"), "not a log").unwrap();
+
+        rotate_logs(&log_dir);
+
+        let mut remaining: Vec<String> = fs::read_dir(&log_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        remaining.sort();
+
+        assert_eq!(remaining.len(), MAX_LOGS, "should keep exactly MAX_LOGS logs");
+        assert_eq!(
+            remaining.first().map(String::as_str),
+            Some("ingst_20260101_000006.json"),
+            "the five oldest must be the ones deleted"
+        );
+        assert_eq!(
+            remaining.last().map(String::as_str),
+            Some("ingst_20260101_000055.json"),
+            "the most recent log must always survive"
+        );
+        assert!(
+            log_dir.join("notes.txt").exists(),
+            "rotation must not touch files that are not logs"
+        );
+
+        fs::remove_dir_all(&log_dir).ok();
+    }
+
+    /// At or below the limit nothing may be deleted — an over-eager rotation
+    /// would discard history the user still needs.
+    #[test]
+    fn rotate_logs_is_a_no_op_at_the_limit() {
+        let log_dir = tmpdir("ingst_log_rotate_limit");
+        for i in 1..=50 {
+            fs::write(log_dir.join(format!("ingst_20260101_{:06}.json", i)), "{}").unwrap();
+        }
+
+        rotate_logs(&log_dir);
+
+        assert_eq!(fs::read_dir(&log_dir).unwrap().count(), 50);
+
+        fs::remove_dir_all(&log_dir).ok();
+    }
+
+    /// End to end: a saved log must be readable back (it is the audit trail the
+    /// user is told to keep) and its hashes must already be in the index, since
+    /// rotation may delete this very log later.
+    #[test]
+    fn save_log_writes_a_readable_log_and_updates_the_index() {
+        let root = tmpdir("ingst_log_save");
+        let dest_root = root.to_string_lossy().to_string();
+        let options = IngestOptions {
+            operation: "copy".to_string(),
+            skip_duplicates: true,
+            dest_root: dest_root.clone(),
+        };
+        let entries = vec![entry("success", Some("saved-hash"), "a.mp4")];
+
+        let path = save_log(&dest_root, &["/Volumes/CARD".to_string()], &options, &entries).unwrap();
+
+        let round_tripped: IngestLog =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(round_tripped.entries.len(), 1);
+        assert_eq!(round_tripped.entries[0].hash.as_deref(), Some("saved-hash"));
+        assert_eq!(round_tripped.sources, vec!["/Volumes/CARD".to_string()]);
+
+        let index: HashMap<String, String> = serde_json::from_str(
+            &fs::read_to_string(root.join(".ingst").join("index.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            index.contains_key("saved-hash"),
+            "hashes must reach the index even if this log is rotated away"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+}
