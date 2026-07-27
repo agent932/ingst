@@ -40,6 +40,37 @@ pub fn ffmpeg_path() -> std::path::PathBuf {
     sidecar_path("ffmpeg")
 }
 
+/// Whether a sidecar is present *and* actually executes.
+///
+/// A bundled-but-broken binary — one dynamically linked against libraries that
+/// do not exist on this machine — fails here exactly like a missing one, which
+/// is the point: both leave the app without video metadata or thumbnails, and
+/// both used to do so with no indication of why.
+pub fn sidecar_works(name: &str) -> bool {
+    std::process::Command::new(sidecar_path(name))
+        .arg("-version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Log which optional sidecars are usable. Called once at startup so a user
+/// reporting "no thumbnails" has something concrete in their log.
+pub fn log_sidecar_status() {
+    for tool in ["ffprobe", "ffmpeg"] {
+        if sidecar_works(tool) {
+            log::info!("sidecar {} ready at {:?}", tool, sidecar_path(tool));
+        } else {
+            log::warn!(
+                "sidecar {} unavailable at {:?} — video capture dates, device names \
+                 and thumbnails will be unavailable; photos are unaffected",
+                tool,
+                sidecar_path(tool)
+            );
+        }
+    }
+}
+
 pub fn normalize_path(path: &str) -> String {
     let path = Path::new(path);
     path.to_string_lossy().to_string()

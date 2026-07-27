@@ -13,3 +13,6 @@ src-tauri/tests/
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 !src-tauri/binaries/README.md
+
+# Agent worktrees and local Claude Code state
+.claude/

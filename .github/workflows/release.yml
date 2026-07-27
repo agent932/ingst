@@ -52,12 +52,56 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Download ffmpeg (arm64)
+      # Homebrew's ffmpeg is dynamically linked against /opt/homebrew/Cellar/...
+      # dylibs, so copying just the executable produced a sidecar that could not
+      # launch on any machine without that exact Homebrew install. Every release
+      # built that way silently shipped without video thumbnails or metadata.
+      # These are statically linked builds, pinned by tag and checksum.
+      - name: Fetch static ffmpeg/ffprobe sidecars
+        env:
+          FFMPEG_RELEASE: b6.1.1
+          FFMPEG_SHA256:  a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584
+          FFPROBE_SHA256: bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64
         run: |
-          brew install ffmpeg
+          set -euo pipefail
+          base="https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_RELEASE}"
           mkdir -p src-tauri/binaries
-          cp "$(which ffprobe)" src-tauri/binaries/ffprobe-aarch64-apple-darwin
-          cp "$(which ffmpeg)"  src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+
+          curl -fsSL "$base/ffmpeg-darwin-arm64"  -o src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+          curl -fsSL "$base/ffprobe-darwin-arm64" -o src-tauri/binaries/ffprobe-aarch64-apple-darwin
+
+          echo "${FFMPEG_SHA256}  src-tauri/binaries/ffmpeg-aarch64-apple-darwin"   | shasum -a 256 -c -
+          echo "${FFPROBE_SHA256}  src-tauri/binaries/ffprobe-aarch64-apple-darwin" | shasum -a 256 -c -
+
+          chmod +x src-tauri/binaries/ffmpeg-aarch64-apple-darwin \
+                   src-tauri/binaries/ffprobe-aarch64-apple-darwin
+
+          # arm64 macOS refuses to exec an unsigned binary. Ad-hoc sign so the
+          # verification step below can run them; Tauri re-signs with the real
+          # identity during bundling when signing secrets are configured.
+          codesign --force --sign - src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+          codesign --force --sign - src-tauri/binaries/ffprobe-aarch64-apple-darwin
+
+      # Guard against ever re-introducing a dynamically linked sidecar. Without
+      # this the failure is invisible until a user runs the shipped app.
+      - name: Verify sidecars are self-contained and runnable
+        run: |
+          set -euo pipefail
+          fail=0
+          for bin in src-tauri/binaries/ffmpeg-* src-tauri/binaries/ffprobe-*; do
+            echo "── $bin"
+            external=$(otool -L "$bin" | tail -n +2 | awk '{print $1}' \
+                       | grep -vE '^(/usr/lib/|/System/Library/)' || true)
+            if [ -n "$external" ]; then
+              echo "::error::$bin links against libraries absent on user machines:"
+              echo "$external"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+          ./src-tauri/binaries/ffmpeg-aarch64-apple-darwin  -version | head -1
+          ./src-tauri/binaries/ffprobe-aarch64-apple-darwin -version | head -1
 
       - name: Enable externalBin in tauri.conf.json
         run: |
@@ -101,17 +145,32 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Download ffmpeg (Windows x86-64)
-        shell: pwsh
+      # Previously pulled BtbN's "latest" rolling tag, which is unpinned and
+      # unverified, so two runs of the same commit could ship different ffmpeg
+      # builds. Same pinned, checksummed source as the macOS job.
+      - name: Fetch static ffmpeg/ffprobe sidecars
+        shell: bash
+        env:
+          FFMPEG_RELEASE: b6.1.1
+          FFMPEG_SHA256:  04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00
+          FFPROBE_SHA256: 3a7e2dc003dc2cd1472827e4c7c4f056ae1ae0ae7c5bbc580c99b49827351ba4
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
-          $binDir = (Get-ChildItem ffmpeg-tmp -Recurse -Directory -Filter bin |
-                     Select-Object -First 1).FullName
-          New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
-          Copy-Item "$binDir\ffprobe.exe" "src-tauri\binaries\ffprobe-x86_64-pc-windows-msvc.exe"
-          Copy-Item "$binDir\ffmpeg.exe"  "src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe"
+          set -euo pipefail
+          base="https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_RELEASE}"
+          mkdir -p src-tauri/binaries
+
+          curl -fsSL "$base/ffmpeg-win32-x64"  -o src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+          curl -fsSL "$base/ffprobe-win32-x64" -o src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe
+
+          echo "${FFMPEG_SHA256} *src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"   | sha256sum -c -
+          echo "${FFPROBE_SHA256} *src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe" | sha256sum -c -
+
+      - name: Verify sidecars are runnable
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe  -version | head -1
+          ./src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe -version | head -1
 
       - name: Enable externalBin in tauri.conf.json
         shell: pwsh

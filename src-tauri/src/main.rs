@@ -10,7 +10,8 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             log::info!("Ingst application starting...");
-            
+            ingst_lib::utils::paths::log_sidecar_status();
+
             let window = app.get_webview_window("main").unwrap();
             window.set_title("Ingst").ok();
             
