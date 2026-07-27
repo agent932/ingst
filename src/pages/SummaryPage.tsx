@@ -41,11 +41,27 @@ export default function SummaryPage() {
   return (
     <div className="max-w-3xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Ingest Complete</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+          {ingestResult?.cancelled ? 'Ingest Cancelled' : 'Ingest Complete'}
+        </h1>
         <p className="text-gray-600 dark:text-gray-400 mt-1">
-          Your media has been organized into your library
+          {ingestResult?.cancelled
+            ? 'You stopped this run before it finished'
+            : 'Your media has been organized into your library'}
         </p>
       </div>
+
+      {ingestResult?.cancelled && (
+        <div className="card p-4 mb-6 bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800">
+          <p className="text-sm text-orange-800 dark:text-orange-300">
+            <span className="font-medium">
+              {ingestResult.remaining_count} file{ingestResult.remaining_count === 1 ? '' : 's'} were never started.
+            </span>{' '}
+            Everything below was copied and checksum-verified, so running the ingest
+            again will skip it and pick up only what is missing.
+          </p>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-4 mb-6">
         <div className="card p-4 text-center">

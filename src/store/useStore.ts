@@ -66,6 +66,8 @@ export interface IngestResult {
   error_count: number;
   errors: string[];
   log_path: string;
+  cancelled: boolean;
+  remaining_count: number;
 }
 
 interface StoreState {
@@ -202,16 +204,18 @@ export const useStore = create<StoreState>((set, get) => ({
     currentStep: Math.max(state.currentStep - 1, 1) 
   })),
   
-  reset: () => set({
+  reset: () => set((state) => ({
     currentStep: 1,
     sources: [],
     destination: '',
-    operation: 'copy',
-    skipDuplicates: true,
+    // Fall back to the user's saved defaults rather than hardcoded values,
+    // which used to silently undo their Settings choices on every new ingest.
+    operation: (state.settings.default_operation as 'copy' | 'move') || 'copy',
+    skipDuplicates: state.settings.skip_duplicates_default,
     scannedFiles: [],
     ingestPlan: null,
     progress: null,
     ingestResult: null,
     ingestStarted: false,
-  }),
+  })),
 }));

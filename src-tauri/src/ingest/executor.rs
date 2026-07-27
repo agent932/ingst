@@ -23,8 +23,8 @@ struct InFlightFile {
     total: u64,
     /// Set once the write finishes and checksum verification begins.
     verifying: Arc<AtomicBool>,
-    /// Bytes hashed during verification. Both the source and the copy are read,
-    /// so this counts up to `total * 2`.
+    /// Bytes hashed during verification. The source is hashed while copying, so
+    /// only the copy is read back and this counts up to `total`.
     hashed: Arc<AtomicU64>,
 }
 
@@ -137,10 +137,9 @@ where
                         .max_by_key(|(_, f)| f.total)
                         .map(|(path, f)| {
                             let verifying = f.verifying.load(Ordering::SeqCst);
-                            // During verification report hashing progress
-                            // instead — both files are read, hence total * 2.
+                            // During verification report hashing progress instead.
                             let (bytes, of) = if verifying {
-                                (f.hashed.load(Ordering::Relaxed), f.total * 2)
+                                (f.hashed.load(Ordering::Relaxed), f.total)
                             } else {
                                 (f.bytes.load(Ordering::SeqCst), f.total)
                             };
@@ -370,6 +369,11 @@ where
 
     ticker_done.store(true, Ordering::SeqCst);
 
+    // Cancelling breaks out of the dispatch loop, so operations never reached
+    // are simply absent from the counts. Record it so the UI can say the run
+    // was stopped rather than claiming it finished.
+    let cancelled = is_cancelled();
+
     let log_path = crate::ingest::logging::save_log(
         &options.dest_root,
         &plan
@@ -383,21 +387,18 @@ where
 
     let final_bytes = bytes_copied.load(Ordering::SeqCst);
 
-    app.emit(
-        "ingest-progress",
-        &ProgressEvent {
-            current_file:       "Complete".to_string(),
-            current_index:      total,
-            total,
-            bytes_copied:       final_bytes,
-            total_bytes,
-            current_file_bytes: 0,
-            current_file_total: 0,
-            elapsed_secs:       start_time.elapsed().as_secs(),
-            status:             "complete".to_string(),
-        },
-    )
-    .ok();
+    emit_progress(
+        app,
+        if cancelled { "Cancelled" } else { "Complete" }.to_string(),
+        completed_count.load(Ordering::SeqCst),
+        total,
+        final_bytes,
+        total_bytes,
+        0,
+        0,
+        start_time.elapsed().as_secs(),
+        if cancelled { "cancelled" } else { "complete" },
+    );
 
     let success = success_count.load(Ordering::SeqCst);
     let skipped = skipped_count.load(Ordering::SeqCst);
@@ -405,10 +406,13 @@ where
     let final_errors = errors.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
     log::info!(
-        "Ingest complete: {} success, {} skipped, {} errors",
+        "Ingest {}: {} success, {} skipped, {} errors ({} of {} operations reached)",
+        if cancelled { "cancelled" } else { "complete" },
         success,
         skipped,
-        errors_n
+        errors_n,
+        completed_count.load(Ordering::SeqCst),
+        total
     );
 
     Ok(IngestResult {
@@ -417,6 +421,8 @@ where
         error_count:   errors_n,
         errors:        final_errors,
         log_path,
+        cancelled,
+        remaining_count: total.saturating_sub(completed_count.load(Ordering::SeqCst)),
     })
 }
 
@@ -426,25 +432,6 @@ fn part_path(dest: &Path) -> std::path::PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     dest.with_file_name(name)
-}
-
-/// Compare SHA-256 of two files, adding progress as each is read.
-fn verify_files(
-    source: &str,
-    dest: &str,
-    hashed: &AtomicU64,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let src_hash = crate::utils::hashing::full_hash_with_progress(source, Some(hashed))?;
-    let dst_hash = crate::utils::hashing::full_hash_with_progress(dest, Some(hashed))?;
-
-    if src_hash != dst_hash {
-        return Err(format!(
-            "Checksum mismatch after copy — source: {} dest: {}",
-            src_hash, dst_hash
-        )
-        .into());
-    }
-    Ok(())
 }
 
 /// Copy through a `.part` sidecar, verify it, then rename into place.
@@ -473,23 +460,48 @@ fn copy_verified(
     // Discard any leftover .part from an earlier interrupted run.
     let _ = std::fs::remove_file(&temp_path);
 
-    copy_file_with_progress(source, &temp, bytes_tracker)?;
+    // Hash of the source, computed during the copy rather than by re-reading it.
+    let src_hash = copy_file_hashing(source, &temp, bytes_tracker)?;
 
     verifying.store(true, Ordering::SeqCst);
-    if let Err(e) = verify_files(source, &temp, &hashed) {
+
+    // Read the copy back and compare. This catches a truncated or corrupted
+    // write; it cannot vouch for the physical media, since the read may be
+    // served from the page cache.
+    let dst_hash = match crate::utils::hashing::full_hash_with_progress(&temp, Some(&hashed)) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+    };
+
+    if src_hash != dst_hash {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(e);
+        return Err(format!(
+            "Checksum mismatch after copy — source: {} dest: {}",
+            src_hash, dst_hash
+        )
+        .into());
     }
 
     std::fs::rename(&temp_path, dest_path)?;
     Ok(())
 }
 
-fn copy_file_with_progress(
+/// Copy `source` to `dest`, returning the SHA-256 of the bytes as they stream past.
+///
+/// The copy already reads every byte of the source, so folding them into a hash
+/// here is nearly free and removes an entire re-read during verification. That
+/// read was the expensive one: the source is typically a card, the slowest
+/// device in the chain. Verification then only has to read back the copy.
+fn copy_file_hashing(
     source: &str,
     dest: &str,
     bytes_tracker: Arc<AtomicU64>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use sha2::{Digest, Sha256};
+
     let source_path = Path::new(source);
     let dest_path   = Path::new(dest);
 
@@ -504,18 +516,24 @@ fn copy_file_with_progress(
     let mut dest_file   = std::fs::File::create(dest_path)?;
 
     let mut buffer = vec![0u8; chunk_size];
+    let mut hasher = Sha256::new();
 
     loop {
         let bytes_read = std::io::Read::read(&mut source_file, &mut buffer)?;
         if bytes_read == 0 {
             break;
         }
+        hasher.update(&buffer[..bytes_read]);
         std::io::Write::write_all(&mut dest_file, &buffer[..bytes_read])?;
         bytes_written += bytes_read as u64;
         bytes_tracker.store(bytes_written, Ordering::SeqCst);
     }
 
-    Ok(())
+    // Close the handle before the copy is read back for verification.
+    std::io::Write::flush(&mut dest_file)?;
+    drop(dest_file);
+
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn move_file_with_progress(
@@ -545,4 +563,68 @@ fn move_file_with_progress(
     std::fs::remove_file(source_path)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// The digest computed while streaming must equal a plain full-file hash,
+    /// otherwise every verification would fail on a perfectly good copy.
+    #[test]
+    fn streamed_hash_matches_full_hash() {
+        let dir = tmpdir("ingst_stream_hash");
+        let src = dir.join("src.bin");
+        let dst = dir.join("dst.bin");
+
+        // Larger than the 4 MB copy chunk, so several updates are folded in.
+        let data: Vec<u8> = (0..10_u32 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+
+        let streamed = copy_file_hashing(
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .unwrap();
+
+        let reference = crate::utils::hashing::full_hash(src.to_str().unwrap()).unwrap();
+        assert_eq!(streamed, reference, "streamed digest must match full_hash");
+
+        let copied = crate::utils::hashing::full_hash(dst.to_str().unwrap()).unwrap();
+        assert_eq!(streamed, copied, "copy must be byte-identical to source");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A successful copy leaves the file at its final path and no .part behind.
+    #[test]
+    fn copy_verified_renames_and_leaves_no_part() {
+        let dir = tmpdir("ingst_copy_verified");
+        let src = dir.join("clip.mp4");
+        let dst = dir.join("out").join("clip.mp4");
+        std::fs::write(&src, vec![9u8; 3 * 1024 * 1024]).unwrap();
+
+        copy_verified(
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .unwrap();
+
+        assert!(dst.exists(), "file must land at its final path");
+        assert!(!part_path(&dst).exists(), ".part must not survive a successful copy");
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 3 * 1024 * 1024);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

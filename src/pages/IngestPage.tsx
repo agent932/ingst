@@ -49,7 +49,10 @@ export default function IngestPage() {
   // Derived rather than local-only, so returning to this step after the
   // transfer finished still shows the completed state.
   const isComplete =
-    sawCompleteEvent || ingestResult !== null || progress?.status === 'complete';
+    sawCompleteEvent ||
+    ingestResult !== null ||
+    progress?.status === 'complete' ||
+    progress?.status === 'cancelled';
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -156,6 +159,7 @@ export default function IngestPage() {
   const etaSecs = speed > 0 && remainingBytes > 0 ? Math.round(remainingBytes / (speed * 1024 * 1024)) : null;
   
   const isVerifying = progress?.status === 'verifying';
+  const wasCancelled = progress?.status === 'cancelled' || ingestResult?.cancelled === true;
 
   const getStatusText = () => {
     if (!progress) return 'Preparing...';
@@ -164,6 +168,7 @@ export default function IngestPage() {
       case 'processing': return `${operation === 'copy' ? 'Copying' : 'Moving'} file ${progress.current_index} of ${progress.total}`;
       case 'verifying': return `Verifying checksum — file ${progress.current_index + 1} of ${progress.total}`;
       case 'complete': return 'Complete!';
+      case 'cancelled': return `Cancelled — ${progress.current_index} of ${progress.total} files processed`;
       default: return progress.status;
     }
   };
@@ -186,7 +191,7 @@ export default function IngestPage() {
     <div className="max-w-3xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-          {isComplete ? 'Ingest Complete' : 'Ingesting...'}
+          {wasCancelled ? 'Ingest Cancelled' : isComplete ? 'Ingest Complete' : 'Ingesting...'}
         </h1>
         <p className="text-gray-600 dark:text-gray-400 mt-1">
           {getStatusText()}
@@ -208,13 +213,15 @@ export default function IngestPage() {
         {/* Status indicator */}
         <div className="flex items-center gap-2 mb-4">
           <div className={`w-3 h-3 rounded-full ${
-            isComplete ? 'bg-green-500'
+            wasCancelled ? 'bg-orange-500'
+            : isComplete ? 'bg-green-500'
             : isPaused ? 'bg-yellow-500'
             : isVerifying ? 'bg-blue-500 animate-pulse'
             : 'bg-accent animate-pulse'
           }`} />
           <span className="text-sm text-gray-600 dark:text-gray-400">
-            {isComplete ? 'All files processed'
+            {wasCancelled ? 'Stopped before all files were processed'
+              : isComplete ? 'All files processed'
               : isPaused ? 'Paused'
               : isVerifying ? 'Verifying checksum (SHA-256)'
               : 'Processing...'}

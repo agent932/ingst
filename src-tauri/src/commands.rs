@@ -90,6 +90,10 @@ pub struct IngestResult {
     pub error_count: usize,
     pub errors: Vec<String>,
     pub log_path: String,
+    /// True when the user stopped the run before every operation was reached.
+    pub cancelled: bool,
+    /// Operations never started, non-zero only when `cancelled`.
+    pub remaining_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

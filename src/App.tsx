@@ -9,7 +9,13 @@ import IngestPage from './pages/IngestPage';
 import SummaryPage from './pages/SummaryPage';
 
 function App() {
-  const { currentStep, theme } = useStore();
+  const { currentStep, theme, loadSettings } = useStore();
+
+  // Settings were saved but never read back, so theme, default operation and
+  // last destination were all discarded on every launch.
+  useEffect(() => {
+    loadSettings();
+  }, []);
 
   useEffect(() => {
     const root = window.document.documentElement;
