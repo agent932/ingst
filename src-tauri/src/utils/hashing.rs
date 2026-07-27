@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn fast_hash(path: &str, size: u64) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(path);
@@ -33,21 +34,36 @@ pub fn fast_hash(path: &str, size: u64) -> Result<String, Box<dyn std::error::Er
 }
 
 pub fn full_hash(path: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    full_hash_with_progress(path, None)
+}
+
+/// SHA-256 of a whole file, adding each chunk's length to `progress` as it goes.
+///
+/// Media files run to gigabytes, so hashing is slow enough that the UI needs to
+/// show movement — without a counter the interface looks hung during verify.
+pub fn full_hash_with_progress(
+    path: &str,
+    progress: Option<&AtomicU64>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(path);
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
-    
+
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    
+    // 1 MiB: the old 8 KiB buffer meant ~125k syscalls per gigabyte.
+    let mut buffer = vec![0u8; 1024 * 1024];
+
     loop {
         let bytes_read = reader.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
+        if let Some(p) = progress {
+            p.fetch_add(bytes_read as u64, Ordering::Relaxed);
+        }
     }
-    
+
     let result = hasher.finalize();
     Ok(hex::encode(result))
 }

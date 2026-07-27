@@ -15,8 +15,21 @@ const MAX_PARALLEL: usize = 4;
 /// How often in-flight byte progress is pushed to the UI.
 const TICK_MS: u64 = 200;
 
-/// Files currently being transferred: source path → (bytes written so far, total).
-type InFlight = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, u64)>>>;
+/// A file currently being transferred.
+struct InFlightFile {
+    /// Bytes written so far.
+    bytes: Arc<AtomicU64>,
+    /// Total size of the file.
+    total: u64,
+    /// Set once the write finishes and checksum verification begins.
+    verifying: Arc<AtomicBool>,
+    /// Bytes hashed during verification. Both the source and the copy are read,
+    /// so this counts up to `total * 2`.
+    hashed: Arc<AtomicU64>,
+}
+
+/// Files currently being transferred, keyed by source path.
+type InFlight = Arc<Mutex<HashMap<String, InFlightFile>>>;
 
 #[allow(clippy::too_many_arguments)]
 fn emit_progress(
@@ -117,19 +130,25 @@ where
 
                 let snapshot = {
                     let map = in_flight.lock().unwrap_or_else(|e| e.into_inner());
-                    let live: u64 = map.values().map(|(t, _)| t.load(Ordering::SeqCst)).sum();
+                    let live: u64 = map.values().map(|f| f.bytes.load(Ordering::SeqCst)).sum();
                     // With several copies in flight, report the largest as the
                     // "current" file — it is the one the user is waiting on.
-                    let current = map
-                        .iter()
-                        .max_by_key(|(_, (_, size))| *size)
-                        .map(|(path, (t, size))| {
-                            (path.clone(), t.load(Ordering::SeqCst), *size)
-                        });
-                    current.map(|(path, bytes, size)| (path, bytes, size, live))
+                    map.iter()
+                        .max_by_key(|(_, f)| f.total)
+                        .map(|(path, f)| {
+                            let verifying = f.verifying.load(Ordering::SeqCst);
+                            // During verification report hashing progress
+                            // instead — both files are read, hence total * 2.
+                            let (bytes, of) = if verifying {
+                                (f.hashed.load(Ordering::Relaxed), f.total * 2)
+                            } else {
+                                (f.bytes.load(Ordering::SeqCst), f.total)
+                            };
+                            (path.clone(), bytes, of, verifying, live)
+                        })
                 };
 
-                if let Some((path, file_bytes, file_total, live)) = snapshot {
+                if let Some((path, file_bytes, file_total, verifying, live)) = snapshot {
                     emit_progress(
                         &app,
                         path,
@@ -140,7 +159,7 @@ where
                         file_bytes,
                         file_total,
                         start_time.elapsed().as_secs(),
-                        "processing",
+                        if verifying { "verifying" } else { "processing" },
                     );
                 }
             }
@@ -190,6 +209,8 @@ where
             let _permit = permit; // released when this scope exits
 
             let tracker = Arc::new(AtomicU64::new(0));
+            let verifying = Arc::new(AtomicBool::new(false));
+            let hashed = Arc::new(AtomicU64::new(0));
             let is_transfer = matches!(op.action.as_str(), "copy" | "move");
 
             // Register with the ticker so its bytes show up in live progress.
@@ -197,7 +218,15 @@ where
                 in_flight_c
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(op.source_path.clone(), (tracker.clone(), op.size));
+                    .insert(
+                        op.source_path.clone(),
+                        InFlightFile {
+                            bytes: tracker.clone(),
+                            total: op.size,
+                            verifying: verifying.clone(),
+                            hashed: hashed.clone(),
+                        },
+                    );
             }
 
             // Emit start-of-file progress.
@@ -223,12 +252,11 @@ where
                         let source  = op.source_path.clone();
                         let dest    = op.dest_path.clone();
                         let tracker = tracker.clone();
-                        let source2 = source.clone();
-                        let dest2   = dest.clone();
+                        let verifying_c = verifying.clone();
+                        let hashed_c = hashed.clone();
 
                         match tokio::task::spawn_blocking(move || {
-                            copy_file_with_progress(&source, &dest, tracker)?;
-                            verify_copy(&source2, &dest2)
+                            copy_verified(&source, &dest, tracker, verifying_c, hashed_c)
                         })
                         .await
                         {
@@ -240,9 +268,11 @@ where
                         let source  = op.source_path.clone();
                         let dest    = op.dest_path.clone();
                         let tracker = tracker.clone();
+                        let verifying_c = verifying.clone();
+                        let hashed_c = hashed.clone();
 
                         match tokio::task::spawn_blocking(move || {
-                            move_file_with_progress(&source, &dest, tracker)
+                            move_file_with_progress(&source, &dest, tracker, verifying_c, hashed_c)
                         })
                         .await
                         {
@@ -390,19 +420,68 @@ where
     })
 }
 
-/// Verify a copy by comparing SHA256 of source and destination.
-/// Removes the destination file if hashes don't match.
-fn verify_copy(source: &str, dest: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let src_hash = crate::utils::hashing::full_hash(source)?;
-    let dst_hash = crate::utils::hashing::full_hash(dest)?;
+/// Sidecar path a copy is written to before it is verified: `IMG_0001.jpg`
+/// becomes `IMG_0001.jpg.part`.
+fn part_path(dest: &Path) -> std::path::PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    dest.with_file_name(name)
+}
+
+/// Compare SHA-256 of two files, adding progress as each is read.
+fn verify_files(
+    source: &str,
+    dest: &str,
+    hashed: &AtomicU64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let src_hash = crate::utils::hashing::full_hash_with_progress(source, Some(hashed))?;
+    let dst_hash = crate::utils::hashing::full_hash_with_progress(dest, Some(hashed))?;
+
     if src_hash != dst_hash {
-        let _ = std::fs::remove_file(dest);
         return Err(format!(
             "Checksum mismatch after copy — source: {} dest: {}",
             src_hash, dst_hash
         )
         .into());
     }
+    Ok(())
+}
+
+/// Copy through a `.part` sidecar, verify it, then rename into place.
+///
+/// Writing straight to the final path meant an interrupted copy — crash, force
+/// quit, drive unplugged — left a truncated file under a real media name that
+/// nothing marked as bad, and which the next ingest treated as an existing file
+/// and wrote a `_1` beside instead of repairing. Because rename is atomic, a
+/// file at its final path is now always complete and checksum-verified.
+fn copy_verified(
+    source: &str,
+    dest: &str,
+    bytes_tracker: Arc<AtomicU64>,
+    verifying: Arc<AtomicBool>,
+    hashed: Arc<AtomicU64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dest_path = Path::new(dest);
+
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let temp_path = part_path(dest_path);
+    let temp = temp_path.to_string_lossy().to_string();
+
+    // Discard any leftover .part from an earlier interrupted run.
+    let _ = std::fs::remove_file(&temp_path);
+
+    copy_file_with_progress(source, &temp, bytes_tracker)?;
+
+    verifying.store(true, Ordering::SeqCst);
+    if let Err(e) = verify_files(source, &temp, &hashed) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    std::fs::rename(&temp_path, dest_path)?;
     Ok(())
 }
 
@@ -443,6 +522,8 @@ fn move_file_with_progress(
     source: &str,
     dest: &str,
     bytes_tracker: Arc<AtomicU64>,
+    verifying: Arc<AtomicBool>,
+    hashed: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path   = Path::new(dest);
@@ -451,17 +532,16 @@ fn move_file_with_progress(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Try rename first (fast, same volume).
+    // Try rename first (fast, same volume, and already atomic).
     if std::fs::rename(source_path, dest_path).is_ok() {
         let size = dest_path.metadata().map(|m| m.len()).unwrap_or(0);
         bytes_tracker.store(size, Ordering::SeqCst);
         return Ok(());
     }
 
-    // Fall back to copy + delete with progress.
-    copy_file_with_progress(source, dest, bytes_tracker)?;
-    // Verify before deleting the original — if corrupt, source is preserved.
-    verify_copy(source, dest)?;
+    // Cross-volume: copy through .part and verify before touching the original,
+    // so a failure anywhere leaves the source intact.
+    copy_verified(source, dest, bytes_tracker, verifying, hashed)?;
     std::fs::remove_file(source_path)?;
 
     Ok(())

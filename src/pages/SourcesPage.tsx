@@ -95,9 +95,12 @@ export default function SourcesPage() {
   };
 
   const handleAddVolume = async (volume: MountedVolume) => {
-    await scanSource(volume.path);
+    // Dismiss first: scanning a card takes seconds, and awaiting it here left
+    // the modal sitting open and unresponsive with the page's own scanning
+    // spinner hidden behind it.
     setShowVolumes(false);
     setVolumes([]);
+    await scanSource(volume.path);
   };
 
   const canProceed = sources.length > 0;

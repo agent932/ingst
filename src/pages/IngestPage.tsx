@@ -155,11 +155,14 @@ export default function IngestPage() {
   const remainingBytes = progress ? progress.total_bytes - progress.bytes_copied : 0;
   const etaSecs = speed > 0 && remainingBytes > 0 ? Math.round(remainingBytes / (speed * 1024 * 1024)) : null;
   
+  const isVerifying = progress?.status === 'verifying';
+
   const getStatusText = () => {
     if (!progress) return 'Preparing...';
     switch (progress.status) {
       case 'starting': return 'Preparing files...';
       case 'processing': return `${operation === 'copy' ? 'Copying' : 'Moving'} file ${progress.current_index} of ${progress.total}`;
+      case 'verifying': return `Verifying checksum — file ${progress.current_index + 1} of ${progress.total}`;
       case 'complete': return 'Complete!';
       default: return progress.status;
     }
@@ -204,9 +207,17 @@ export default function IngestPage() {
       <div className="card p-6 mb-6">
         {/* Status indicator */}
         <div className="flex items-center gap-2 mb-4">
-          <div className={`w-3 h-3 rounded-full ${isComplete ? 'bg-green-500' : isPaused ? 'bg-yellow-500' : 'bg-accent animate-pulse'}`} />
+          <div className={`w-3 h-3 rounded-full ${
+            isComplete ? 'bg-green-500'
+            : isPaused ? 'bg-yellow-500'
+            : isVerifying ? 'bg-blue-500 animate-pulse'
+            : 'bg-accent animate-pulse'
+          }`} />
           <span className="text-sm text-gray-600 dark:text-gray-400">
-            {isComplete ? 'All files processed' : isPaused ? 'Paused' : 'Processing...'}
+            {isComplete ? 'All files processed'
+              : isPaused ? 'Paused'
+              : isVerifying ? 'Verifying checksum (SHA-256)'
+              : 'Processing...'}
           </span>
         </div>
 
@@ -236,9 +247,16 @@ export default function IngestPage() {
               <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Current File</span>
             </div>
             {progress && progress.current_file_total > 0 && (
-              <span className="text-xs font-medium text-accent">
-                {currentFileProgress}% ({formatSize(progress.current_file_bytes)} / {formatSize(progress.current_file_total)})
-              </span>
+              isVerifying ? (
+                <span className="text-xs font-medium text-blue-500 dark:text-blue-400 flex items-center gap-1.5">
+                  <span className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                  Hashing {currentFileProgress}% ({formatSize(progress.current_file_bytes)} / {formatSize(progress.current_file_total)})
+                </span>
+              ) : (
+                <span className="text-xs font-medium text-accent">
+                  {currentFileProgress}% ({formatSize(progress.current_file_bytes)} / {formatSize(progress.current_file_total)})
+                </span>
+              )
             )}
           </div>
           
@@ -256,10 +274,18 @@ export default function IngestPage() {
             <div className="mt-3">
               <div className="h-1.5 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-green-500 transition-all duration-300"
+                  className={`h-full transition-all duration-200 ${
+                    isVerifying ? 'bg-blue-500' : 'bg-green-500'
+                  }`}
                   style={{ width: `${currentFileProgress}%` }}
                 />
               </div>
+              {isVerifying && (
+                <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  Reading both the source and the copy to compare SHA-256. A mismatch
+                  discards the copy rather than keeping bad data.
+                </p>
+              )}
             </div>
           )}
         </div>
