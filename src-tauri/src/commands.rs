@@ -285,6 +285,30 @@ fn generate_video_thumbnail(path: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Extract the mount point from a `df -k` line.
+///
+/// The mount point is the 9th field but may contain spaces — "/Volumes/SD Card"
+/// is an ordinary volume name. Splitting the whole line on whitespace and taking
+/// field 8 truncates it to "/Volumes/SD", which then scans as an empty source.
+/// Skip the first 8 fields and take the remainder of the line verbatim.
+#[cfg(target_os = "macos")]
+fn mount_point_from_df_line(line: &str) -> Option<&str> {
+    let mut rest = line;
+
+    for _ in 0..8 {
+        let trimmed = rest.trim_start();
+        let end = trimmed.find(char::is_whitespace)?;
+        rest = &trimmed[end..];
+    }
+
+    let mount_point = rest.trim_start();
+    if mount_point.is_empty() {
+        None
+    } else {
+        Some(mount_point)
+    }
+}
+
 #[tauri::command]
 pub fn get_mounted_volumes() -> Result<Vec<MountedVolume>, String> {
     #[cfg(target_os = "macos")]
@@ -305,8 +329,11 @@ pub fn get_mounted_volumes() -> Result<Vec<MountedVolume>, String> {
         for line in df_str.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 9 {
-                let mount_point = parts[8];
-                
+                let mount_point = match mount_point_from_df_line(line) {
+                    Some(mp) => mp,
+                    None => continue,
+                };
+
                 // Check if it's a removable/volume path
                 if mount_point.starts_with("/Volumes/") || mount_point == "/" {
                     let path = PathBuf::from(mount_point);

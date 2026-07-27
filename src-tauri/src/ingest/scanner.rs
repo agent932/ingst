@@ -16,6 +16,42 @@ pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box
     }).await.map_err(|e| e.to_string())?
 }
 
+/// Decide whether WalkDir should skip an entry *and its children*.
+///
+/// This has to happen in `filter_entry`, not with `continue` inside the loop:
+/// `continue` still lets WalkDir descend into a directory it just rejected.
+fn should_prune(entry: &walkdir::DirEntry, exclusions: &[String]) -> bool {
+    // Never prune the source root, even if the user picked a hidden folder.
+    if entry.depth() == 0 {
+        return false;
+    }
+
+    let name = entry.file_name().to_string_lossy().to_string();
+
+    // macOS AppleDouble stubs (`._IMG_0001.DNG`) repeat the real file's
+    // extension, so a filter that looks only at extensions would happily
+    // ingest these 4 KB resource forks as if they were photos.
+    if name.starts_with("._") || name == ".DS_Store" {
+        return true;
+    }
+
+    let is_dir = entry.file_type().is_dir();
+
+    // System directories: .Spotlight-V100, .fseventsd, .Trashes, .ingst …
+    if is_dir && name.starts_with('.') {
+        return true;
+    }
+
+    if is_dir {
+        let lower = name.to_lowercase();
+        if exclusions.iter().any(|e| lower.contains(e)) {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(&source.path);
 
@@ -36,6 +72,7 @@ pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<
     for entry in WalkDir::new(path)
         .follow_links(true)
         .into_iter()
+        .filter_entry(|e| !should_prune(e, &exclusions))
         .filter_map(|e| e.ok())
     {
         // Symlink guard: reject any entry whose resolved path escapes the source root.
@@ -49,13 +86,9 @@ pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<
             }
         }
         if entry.file_type().is_dir() {
-            let dir_name = entry.file_name().to_string_lossy().to_lowercase();
-            if exclusions.iter().any(|e| dir_name.contains(e)) {
-                continue;
-            }
             continue;
         }
-        
+
         let file_path = entry.path();
         
         if !file_path.is_file() {
@@ -98,16 +131,21 @@ pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<
             .ok()
             .map(format_datetime);
         
-        let (capture_date, device_name) = crate::ingest::metadata::extract_metadata_sync(
-            file_path,
-            modified,
-        );
-        
         let file_name = file_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        
+
+        let (capture_date, device_name) = crate::ingest::metadata::extract_metadata_sync(
+            file_path,
+            modified,
+        );
+
+        // Cameras that write no usable metadata often still encode the local
+        // capture time in the filename (VID_20260723_073020_002.mp4).
+        let capture_date = capture_date
+            .or_else(|| crate::ingest::metadata::timestamp_from_filename(&file_name));
+
         files.push(ScannedFile {
             path: file_path.to_string_lossy().to_string(),
             name: file_name,

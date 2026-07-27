@@ -135,8 +135,10 @@ export default function IngestPage() {
     }
   };
 
-  const progressPercent = progress 
-    ? Math.round(((progress.current_index - 1) / Math.max(progress.total, 1)) * 100)
+  // current_index is a completed-file count, so it needs no -1 offset; the old
+  // form rendered -1% before the first file finished.
+  const progressPercent = progress
+    ? Math.min(100, Math.max(0, Math.round((progress.current_index / Math.max(progress.total, 1)) * 100)))
     : 0;
   
   const elapsedSecs = progress?.elapsed_secs || 0;

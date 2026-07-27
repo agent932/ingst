@@ -38,6 +38,13 @@ pub fn build_plan_sync(
         );
     }
 
+    // Many cameras write a device name onto stills but nothing onto video —
+    // the Insta360 Luna Ultra writes full EXIF to .dng/.jpg and leaves .mp4
+    // with only creation_time. Letting files that resolved a device lend it to
+    // their neighbours keeps one shoot in one folder, instead of splitting it
+    // between the camera name and the card name.
+    let dir_device = infer_device_by_directory(&all_files);
+
     let dest_root = Path::new(&options.dest_root);
 
     let mut operations: Vec<IngestOperation> = Vec::new();
@@ -61,6 +68,11 @@ pub fn build_plan_sync(
 
         let device_name = file.device_name.clone()
             .filter(|d| !d.trim().is_empty())
+            .or_else(|| {
+                Path::new(&file.path)
+                    .parent()
+                    .and_then(|p| dir_device.get(p.to_string_lossy().as_ref()).cloned())
+            })
             .unwrap_or_else(|| source_label.clone());
         let device_name = sanitize_device_name(&device_name);
         
@@ -188,6 +200,37 @@ pub fn build_plan_sync(
         total_size,
         duplicate_count,
     })
+}
+
+/// Map each directory to the device name most commonly reported by the files
+/// inside it, so files in that directory with no device metadata can adopt it.
+///
+/// Ties break on name so the result is stable across runs. A directory holding
+/// files from two cameras resolves to whichever appears more often, which is
+/// the best available guess without per-file grouping.
+fn infer_device_by_directory(files: &[(ScannedFile, String)]) -> HashMap<String, String> {
+    let mut counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+
+    for (file, _) in files {
+        let device = match file.device_name.as_ref().map(|d| d.trim()) {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => continue,
+        };
+        let dir = match Path::new(&file.path).parent() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => continue,
+        };
+        *counts.entry(dir).or_default().entry(device).or_insert(0) += 1;
+    }
+
+    counts
+        .into_iter()
+        .filter_map(|(dir, devices)| {
+            let mut ranked: Vec<(String, usize)> = devices.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            ranked.into_iter().next().map(|(device, _)| (dir, device))
+        })
+        .collect()
 }
 
 /// Strip characters from a camera/device name that are unsafe in file paths.

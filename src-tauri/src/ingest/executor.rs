@@ -1,16 +1,52 @@
 use crate::{IngestOptions, IngestPlan, IngestResult, ProgressEvent};
 use crate::ingest::logging::create_log_entry;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 /// Maximum number of files copied concurrently.
 const MAX_PARALLEL: usize = 4;
+
+/// How often in-flight byte progress is pushed to the UI.
+const TICK_MS: u64 = 200;
+
+/// Files currently being transferred: source path → (bytes written so far, total).
+type InFlight = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, u64)>>>;
+
+#[allow(clippy::too_many_arguments)]
+fn emit_progress(
+    app: &AppHandle,
+    current_file: String,
+    current_index: usize,
+    total: usize,
+    bytes_copied: u64,
+    total_bytes: u64,
+    current_file_bytes: u64,
+    current_file_total: u64,
+    elapsed_secs: u64,
+    status: &str,
+) {
+    app.emit(
+        "ingest-progress",
+        &ProgressEvent {
+            current_file,
+            current_index,
+            total,
+            bytes_copied,
+            total_bytes,
+            current_file_bytes,
+            current_file_total,
+            elapsed_secs,
+            status: status.to_string(),
+        },
+    )
+    .ok();
+}
 
 pub async fn execute_plan<F, P>(
     app: &AppHandle,
@@ -41,28 +77,75 @@ where
 
     let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL));
 
-    // Progress channel — receiver runs on its own task.
-    let (progress_tx, progress_rx) = mpsc::channel::<ProgressEvent>();
-
-    let app_for_receiver = app.clone();
-    let _receiver_handle = tokio::spawn(async move {
-        while let Ok(progress) = progress_rx.recv() {
-            app_for_receiver.emit("ingest-progress", &progress).ok();
-        }
-    });
+    let in_flight: InFlight = Arc::new(Mutex::new(HashMap::new()));
 
     // Emit initial progress.
-    let _ = progress_tx.send(ProgressEvent {
-        current_file: "Starting...".to_string(),
-        current_index: 0,
+    emit_progress(
+        app,
+        "Starting...".to_string(),
+        0,
         total,
-        bytes_copied: 0,
+        0,
         total_bytes,
-        current_file_bytes: 0,
-        current_file_total: 0,
-        elapsed_secs: 0,
-        status: "starting".to_string(),
-    });
+        0,
+        0,
+        0,
+        "starting",
+    );
+
+    // Ticker: pushes byte-level progress for whatever is currently copying.
+    //
+    // Events are emitted straight from `AppHandle`, which is `Send + Sync`.
+    // The previous implementation funnelled them through a `std::sync::mpsc`
+    // channel drained by `tokio::spawn`, where the blocking `recv()` parked a
+    // runtime worker instead of yielding — the UI froze on "Starting..." for
+    // the whole ingest while files copied normally underneath.
+    let ticker_done = Arc::new(AtomicBool::new(false));
+    {
+        let app = app.clone();
+        let in_flight = in_flight.clone();
+        let completed_bytes = bytes_copied.clone();
+        let completed_count = completed_count.clone();
+        let done = ticker_done.clone();
+
+        tokio::spawn(async move {
+            while !done.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
+                if done.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let snapshot = {
+                    let map = in_flight.lock().unwrap_or_else(|e| e.into_inner());
+                    let live: u64 = map.values().map(|(t, _)| t.load(Ordering::SeqCst)).sum();
+                    // With several copies in flight, report the largest as the
+                    // "current" file — it is the one the user is waiting on.
+                    let current = map
+                        .iter()
+                        .max_by_key(|(_, (_, size))| *size)
+                        .map(|(path, (t, size))| {
+                            (path.clone(), t.load(Ordering::SeqCst), *size)
+                        });
+                    current.map(|(path, bytes, size)| (path, bytes, size, live))
+                };
+
+                if let Some((path, file_bytes, file_total, live)) = snapshot {
+                    emit_progress(
+                        &app,
+                        path,
+                        completed_count.load(Ordering::SeqCst),
+                        total,
+                        completed_bytes.load(Ordering::SeqCst) + live,
+                        total_bytes,
+                        file_bytes,
+                        file_total,
+                        start_time.elapsed().as_secs(),
+                        "processing",
+                    );
+                }
+            }
+        });
+    }
 
     let mut join_set: JoinSet<()> = JoinSet::new();
 
@@ -100,24 +183,36 @@ where
         let completed_count_c = completed_count.clone();
         let log_entries_c    = log_entries.clone();
         let errors_c         = errors.clone();
-        let progress_tx_c    = progress_tx.clone();
+        let app_c            = app.clone();
+        let in_flight_c      = in_flight.clone();
 
         join_set.spawn(async move {
             let _permit = permit; // released when this scope exits
 
+            let tracker = Arc::new(AtomicU64::new(0));
+            let is_transfer = matches!(op.action.as_str(), "copy" | "move");
+
+            // Register with the ticker so its bytes show up in live progress.
+            if is_transfer {
+                in_flight_c
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(op.source_path.clone(), (tracker.clone(), op.size));
+            }
+
             // Emit start-of-file progress.
-            let done_so_far = completed_count_c.load(Ordering::SeqCst);
-            let _ = progress_tx_c.send(ProgressEvent {
-                current_file:       op.source_path.clone(),
-                current_index:      done_so_far,
+            emit_progress(
+                &app_c,
+                op.source_path.clone(),
+                completed_count_c.load(Ordering::SeqCst),
                 total,
-                bytes_copied:       bytes_copied_c.load(Ordering::SeqCst),
+                bytes_copied_c.load(Ordering::SeqCst),
                 total_bytes,
-                current_file_bytes: 0,
-                current_file_total: 0,
-                elapsed_secs:       start_time.elapsed().as_secs(),
-                status:             "processing".to_string(),
-            });
+                0,
+                if is_transfer { op.size } else { 0 },
+                start_time.elapsed().as_secs(),
+                "processing",
+            );
 
             // Ok(true)  → bytes were actually transferred
             // Ok(false) → intentionally skipped, nothing written
@@ -127,13 +222,12 @@ where
                     "copy" => {
                         let source  = op.source_path.clone();
                         let dest    = op.dest_path.clone();
-                        let tracker = Arc::new(AtomicU64::new(0));
-                        let flag    = Arc::new(AtomicBool::new(false));
+                        let tracker = tracker.clone();
                         let source2 = source.clone();
                         let dest2   = dest.clone();
 
                         match tokio::task::spawn_blocking(move || {
-                            copy_file_with_progress(&source, &dest, tracker, flag)?;
+                            copy_file_with_progress(&source, &dest, tracker)?;
                             verify_copy(&source2, &dest2)
                         })
                         .await
@@ -145,11 +239,10 @@ where
                     "move" => {
                         let source  = op.source_path.clone();
                         let dest    = op.dest_path.clone();
-                        let tracker = Arc::new(AtomicU64::new(0));
-                        let flag    = Arc::new(AtomicBool::new(false));
+                        let tracker = tracker.clone();
 
                         match tokio::task::spawn_blocking(move || {
-                            move_file_with_progress(&source, &dest, tracker, flag)
+                            move_file_with_progress(&source, &dest, tracker)
                         })
                         .await
                         {
@@ -159,6 +252,13 @@ where
                     }
                     _ => Ok(false),
                 };
+
+            if is_transfer {
+                in_flight_c
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&op.source_path);
+            }
 
             match result {
                 Ok(true) => {
@@ -220,22 +320,25 @@ where
 
             // Emit completion progress for this file.
             let done = completed_count_c.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = progress_tx_c.send(ProgressEvent {
-                current_file:       op.source_path.clone(),
-                current_index:      done,
+            emit_progress(
+                &app_c,
+                op.source_path.clone(),
+                done,
                 total,
-                bytes_copied:       bytes_copied_c.load(Ordering::SeqCst),
+                bytes_copied_c.load(Ordering::SeqCst),
                 total_bytes,
-                current_file_bytes: 0,
-                current_file_total: 0,
-                elapsed_secs:       start_time.elapsed().as_secs(),
-                status:             "processing".to_string(),
-            });
+                if is_transfer { op.size } else { 0 },
+                if is_transfer { op.size } else { 0 },
+                start_time.elapsed().as_secs(),
+                "processing",
+            );
         });
     }
 
     // Wait for all in-flight tasks to finish.
     while join_set.join_next().await.is_some() {}
+
+    ticker_done.store(true, Ordering::SeqCst);
 
     let log_path = crate::ingest::logging::save_log(
         &options.dest_root,
@@ -307,7 +410,6 @@ fn copy_file_with_progress(
     source: &str,
     dest: &str,
     bytes_tracker: Arc<AtomicU64>,
-    _emit_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path   = Path::new(dest);
@@ -341,7 +443,6 @@ fn move_file_with_progress(
     source: &str,
     dest: &str,
     bytes_tracker: Arc<AtomicU64>,
-    emit_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path   = Path::new(dest);
@@ -358,7 +459,7 @@ fn move_file_with_progress(
     }
 
     // Fall back to copy + delete with progress.
-    copy_file_with_progress(source, dest, bytes_tracker, emit_flag)?;
+    copy_file_with_progress(source, dest, bytes_tracker)?;
     // Verify before deleting the original — if corrupt, source is preserved.
     verify_copy(source, dest)?;
     std::fs::remove_file(source_path)?;

@@ -74,8 +74,15 @@ export default function ReviewPage() {
   // undefined = loading, null = unsupported/failed, string = data URL
   const [thumbnails, setThumbnails] = useState<Map<string, string | null>>(new Map());
   const thumbLoadRef = useRef(false);
+  const planBuiltRef = useRef(false);
 
   useEffect(() => {
+    // StrictMode fires mount effects twice in dev, which rescans every source
+    // and rebuilds the plan a second time. The ref survives the simulated
+    // remount; genuine navigation back to this step gets a fresh one and
+    // rebuilds as expected. "Try Again" calls buildPlan directly.
+    if (planBuiltRef.current) return;
+    planBuiltRef.current = true;
     buildPlan();
   }, []);
 
