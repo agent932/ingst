@@ -588,10 +588,11 @@ mod tests {
         let data: Vec<u8> = (0..10_u32 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         std::fs::write(&src, &data).unwrap();
 
+        let tracker = Arc::new(AtomicU64::new(0));
         let streamed = copy_file_hashing(
             src.to_str().unwrap(),
             dst.to_str().unwrap(),
-            Arc::new(AtomicU64::new(0)),
+            tracker.clone(),
         )
         .unwrap();
 
@@ -601,16 +602,31 @@ mod tests {
         let copied = crate::utils::hashing::full_hash(dst.to_str().unwrap()).unwrap();
         assert_eq!(streamed, copied, "copy must be byte-identical to source");
 
+        // The ticker reports this counter as the file's progress, so it has to
+        // hold the running total, not the size of the last chunk.
+        assert_eq!(
+            tracker.load(Ordering::SeqCst),
+            data.len() as u64,
+            "progress tracker must end at the full file size"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A successful copy leaves the file at its final path and no .part behind.
+    /// A successful copy leaves a byte-identical file at its final path and no
+    /// .part behind. The content check matters as much as the path: a copy of
+    /// the right length holding the wrong bytes is the silent corruption the
+    /// whole verify step exists to prevent.
     #[test]
     fn copy_verified_renames_and_leaves_no_part() {
         let dir = tmpdir("ingst_copy_verified");
         let src = dir.join("clip.mp4");
         let dst = dir.join("out").join("clip.mp4");
-        std::fs::write(&src, vec![9u8; 3 * 1024 * 1024]).unwrap();
+
+        // Varying bytes across a chunk boundary, so a copy that repeated or
+        // dropped a chunk would not still hash equal.
+        let data: Vec<u8> = (0..5_u32 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
 
         copy_verified(
             src.to_str().unwrap(),
@@ -623,7 +639,41 @@ mod tests {
 
         assert!(dst.exists(), "file must land at its final path");
         assert!(!part_path(&dst).exists(), ".part must not survive a successful copy");
-        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 3 * 1024 * 1024);
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), data.len() as u64);
+        assert_eq!(
+            crate::utils::hashing::full_hash(src.to_str().unwrap()).unwrap(),
+            crate::utils::hashing::full_hash(dst.to_str().unwrap()).unwrap(),
+            "the file at the final path must be byte-identical to the source"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A copy that fails must leave nothing at the destination. A file sitting
+    /// at the final path is the app's only proof that a transfer completed and
+    /// verified: the next ingest treats it as footage already safely ingested,
+    /// and `resolve_collision` writes a `_1` beside it rather than repairing it.
+    #[test]
+    fn failed_copy_leaves_nothing_at_the_destination() {
+        let dir = tmpdir("ingst_copy_failure");
+        let missing = dir.join("card").join("never_written.mp4");
+        let dst = dir.join("out").join("clip.mp4");
+
+        let result = copy_verified(
+            missing.to_str().unwrap(),
+            dst.to_str().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        assert!(result.is_err(), "an unreadable source must fail the copy");
+        assert!(!dst.exists(), "a failed copy must not leave a file at the final path");
+        assert!(
+            !part_path(&dst).exists(),
+            "a failed copy must not leave a .part behind — the destination is \
+             only ever created after the source opens"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
