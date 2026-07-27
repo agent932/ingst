@@ -291,17 +291,9 @@ pub fn get_mounted_volumes() -> Result<Vec<MountedVolume>, String> {
     {
         use std::path::PathBuf;
         use std::process::Command;
-        
-        let output = Command::new("diskutil")
-            .arg("list")
-            .arg("-plist")
-            .output()
-            .map_err(|e| e.to_string())?;
-        
-        let plist_str = String::from_utf8_lossy(&output.stdout);
-        
+
         let mut volumes = Vec::new();
-        
+
         // Use df to get mounted volumes
         let df_output = Command::new("df")
             .arg("-k")

@@ -8,7 +8,6 @@ pub use utils::*;
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::env;
 
     #[test]
@@ -31,14 +30,42 @@ mod tests {
     fn test_collision_naming() {
         let temp_dir = env::temp_dir().join("ingst_test_collisions");
         std::fs::create_dir_all(&temp_dir).ok();
-        
+
         std::fs::write(temp_dir.join("test.mp4"), "test").ok();
-        
+
         use crate::ingest::plan::resolve_collision;
-        let result = resolve_collision(&temp_dir, "test.mp4");
-        
+        let mut claimed = std::collections::HashSet::new();
+        let result = resolve_collision(&temp_dir, "test.mp4", &mut claimed);
+
         assert!(result.to_string_lossy().contains("test_1.mp4"));
-        
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Two source files with the same name must never be assigned the same
+    /// destination, even though neither exists on disk when the plan is built.
+    #[test]
+    fn test_collision_within_plan() {
+        let temp_dir = env::temp_dir().join("ingst_test_plan_collisions");
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        use crate::ingest::plan::resolve_collision;
+        let mut claimed = std::collections::HashSet::new();
+
+        let first  = resolve_collision(&temp_dir, "IMG_0001.JPG", &mut claimed);
+        let second = resolve_collision(&temp_dir, "IMG_0001.JPG", &mut claimed);
+        let third  = resolve_collision(&temp_dir, "IMG_0001.JPG", &mut claimed);
+
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        assert_ne!(first, third);
+        assert!(second.to_string_lossy().contains("IMG_0001_1.JPG"));
+        assert!(third.to_string_lossy().contains("IMG_0001_2.JPG"));
+
+        // Case-insensitive filesystems: differing case is still the same file.
+        let lower = resolve_collision(&temp_dir, "img_0001.jpg", &mut claimed);
+        assert_ne!(lower.to_string_lossy().to_lowercase(), first.to_string_lossy().to_lowercase());
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 

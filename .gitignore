@@ -5,3 +5,11 @@ target/
 *.log
 .env
 .env.local
+
+# Local-only integration tests
+src-tauri/tests/
+
+# Bundled ffmpeg/ffprobe sidecars (fetched during CI release builds)
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+!src-tauri/binaries/README.md

@@ -119,25 +119,11 @@ where
                 status:             "processing".to_string(),
             });
 
-            let result: Result<(), Box<dyn std::error::Error + Send + Sync>> =
+            // Ok(true)  → bytes were actually transferred
+            // Ok(false) → intentionally skipped, nothing written
+            let result: Result<bool, Box<dyn std::error::Error + Send + Sync>> =
                 match op.action.as_str() {
-                    "skip" => {
-                        skipped_count_c.fetch_add(1, Ordering::SeqCst);
-                        log_entries_c
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(create_log_entry(
-                                &op.source_path,
-                                &op.dest_path,
-                                op.size,
-                                op.hash.clone(),
-                                op.capture_date.clone(),
-                                op.device_name.clone(),
-                                "skipped",
-                                None,
-                            ));
-                        Ok(())
-                    }
+                    "skip" => Ok(false),
                     "copy" => {
                         let source  = op.source_path.clone();
                         let dest    = op.dest_path.clone();
@@ -152,7 +138,7 @@ where
                         })
                         .await
                         {
-                            Ok(inner) => inner,
+                            Ok(inner) => inner.map(|()| true),
                             Err(e)    => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                         }
                     }
@@ -167,15 +153,15 @@ where
                         })
                         .await
                         {
-                            Ok(inner) => inner,
+                            Ok(inner) => inner.map(|()| true),
                             Err(e)    => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                         }
                     }
-                    _ => Ok(()),
+                    _ => Ok(false),
                 };
 
             match result {
-                Ok(()) => {
+                Ok(true) => {
                     success_count_c.fetch_add(1, Ordering::SeqCst);
                     bytes_copied_c.fetch_add(op.size, Ordering::SeqCst);
                     log_entries_c
@@ -189,6 +175,22 @@ where
                             op.capture_date.clone(),
                             op.device_name.clone(),
                             "success",
+                            None,
+                        ));
+                }
+                Ok(false) => {
+                    skipped_count_c.fetch_add(1, Ordering::SeqCst);
+                    log_entries_c
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(create_log_entry(
+                            &op.source_path,
+                            &op.dest_path,
+                            op.size,
+                            op.hash.clone(),
+                            op.capture_date.clone(),
+                            op.device_name.clone(),
+                            "skipped",
                             None,
                         ));
                 }

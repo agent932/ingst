@@ -240,38 +240,36 @@ fn format_datetime(time: SystemTime) -> String {
     datetime.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
+/// Human-readable label for a *source root* — a card, drive, or folder.
+///
+/// Note this expects the source root, not a path to a file inside it: passing a
+/// file path yields the file's own name, which is never a useful device name.
 pub fn get_source_label(path: &str) -> String {
-    let path = Path::new(path);
-    
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
-        let output = Command::new("diskutil")
-            .arg("info")
-            .arg("-plist")
-            .arg(path)
-            .output();
-        
-        if let Ok(output) = output {
-            if let Ok(plist) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(name) = plist.get("VolumeName").and_then(|v| v.as_str()) {
-                    return name.to_string();
-                }
+        // Cards and external drives mount at /Volumes/<NAME>; that name is the
+        // volume label the user sees in Finder.
+        if let Some(rest) = path.strip_prefix("/Volumes/") {
+            let name = rest.split('/').next().unwrap_or_default();
+            if !name.is_empty() {
+                return name.to_string();
             }
         }
     }
-    
-    #[cfg(target_os = "windows")]
-    {
-        let name = path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+
+    let p = Path::new(path);
+
+    if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
         if !name.is_empty() {
             return name;
         }
     }
-    
-    path.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "UnknownSource".to_string())
+
+    // Bare drive roots (Windows `D:\`, Unix `/`) have no file_name component.
+    let fallback: String = path.chars().filter(|c| c.is_alphanumeric()).collect();
+    if fallback.is_empty() {
+        "UnknownSource".to_string()
+    } else {
+        fallback
+    }
 }

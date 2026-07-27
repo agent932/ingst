@@ -81,8 +81,10 @@ interface StoreState {
   ingestResult: IngestResult | null;
   isScanning: boolean;
   isIngesting: boolean;
+  /** Whether the current plan's transfer has already been launched. */
+  ingestStarted: boolean;
   settings: Settings;
-  
+
   setCurrentStep: (step: number) => void;
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
   addSource: (source: Source) => void;
@@ -97,6 +99,7 @@ interface StoreState {
   setIngestResult: (result: IngestResult | null) => void;
   setIsScanning: (scanning: boolean) => void;
   setIsIngesting: (ingesting: boolean) => void;
+  setIngestStarted: (started: boolean) => void;
   loadSettings: () => Promise<void>;
   saveSettings: () => Promise<void>;
   nextStep: () => void;
@@ -117,6 +120,7 @@ export const useStore = create<StoreState>((set, get) => ({
   ingestResult: null,
   isScanning: false,
   isIngesting: false,
+  ingestStarted: false,
   settings: {
     default_operation: 'copy',
     skip_duplicates_default: true,
@@ -144,11 +148,21 @@ export const useStore = create<StoreState>((set, get) => ({
   setOperation: (op) => set({ operation: op }),
   setSkipDuplicates: (skip) => set({ skipDuplicates: skip }),
   setScannedFiles: (files) => set({ scannedFiles: files }),
-  setIngestPlan: (plan) => set({ ingestPlan: plan }),
+
+  // A new plan means a new run: clear the previous run's progress, result, and
+  // started flag so the Ingest step can execute again.
+  setIngestPlan: (plan) => set({
+    ingestPlan: plan,
+    ingestStarted: false,
+    ingestResult: null,
+    progress: null,
+  }),
+
   setProgress: (progress) => set({ progress }),
   setIngestResult: (result) => set({ ingestResult: result }),
   setIsScanning: (scanning) => set({ isScanning: scanning }),
   setIsIngesting: (ingesting) => set({ isIngesting: ingesting }),
+  setIngestStarted: (started) => set({ ingestStarted: started }),
   
   loadSettings: async () => {
     try {
@@ -198,5 +212,6 @@ export const useStore = create<StoreState>((set, get) => ({
     ingestPlan: null,
     progress: null,
     ingestResult: null,
+    ingestStarted: false,
   }),
 }));

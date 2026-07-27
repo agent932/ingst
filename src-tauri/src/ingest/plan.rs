@@ -2,7 +2,7 @@ use crate::{IngestOperation, IngestOptions, IngestPlan, ScannedFile, SourcePath}
 use crate::ingest::scanner;
 use crate::ingest::logging;
 use crate::utils::hashing;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub async fn build_plan(
@@ -21,31 +21,47 @@ pub fn build_plan_sync(
     sources: Vec<SourcePath>,
     options: &IngestOptions,
 ) -> Result<IngestPlan, Box<dyn std::error::Error + Send + Sync>> {
-    let mut all_files: Vec<ScannedFile> = Vec::new();
-    
+    // Each file is paired with the label of the source it came from, so that a
+    // file whose own metadata has no device name can fall back to the card or
+    // folder it was read from.
+    let mut all_files: Vec<(ScannedFile, String)> = Vec::new();
+
     for source in &sources {
         let result = scanner::scan_directory_sync(source)?;
-        all_files.extend(result.files);
+        let source_label = if source.label.trim().is_empty() {
+            scanner::get_source_label(&source.path)
+        } else {
+            source.label.clone()
+        };
+        all_files.extend(
+            result.files.into_iter().map(|f| (f, source_label.clone())),
+        );
     }
-    
+
     let dest_root = Path::new(&options.dest_root);
-    
+
     let mut operations: Vec<IngestOperation> = Vec::new();
     let mut seen_hashes: HashMap<String, String> = HashMap::new();
     let mut duplicate_count = 0;
-    
+
+    // Destination paths already handed out during this plan. Without this, two
+    // source files with the same name landing in the same folder would both be
+    // assigned the same destination and the second would overwrite the first —
+    // `resolve_collision` alone can only see files already on disk.
+    let mut claimed: HashSet<String> = HashSet::new();
+
     // Load existing hashes from previous ingest logs for true idempotency
     if options.skip_duplicates {
         seen_hashes = logging::load_existing_hashes(&options.dest_root);
     }
-    
-    for file in &all_files {
+
+    for (file, source_label) in &all_files {
         let capture_date = file.capture_date.clone()
             .or_else(|| Some(file.modified.clone()));
-        
+
         let device_name = file.device_name.clone()
-            .or_else(|| Some(scanner::get_source_label(&file.path)))
-            .unwrap_or_else(|| "UnknownDevice".to_string());
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| source_label.clone());
         let device_name = sanitize_device_name(&device_name);
         
         let date_path = capture_date
@@ -69,7 +85,7 @@ pub fn build_plan_sync(
             continue;
         }
 
-        let dest_path = resolve_collision(&dest_dir, &file.name);
+        let dest_path = resolve_collision(&dest_dir, &file.name, &mut claimed);
         
         let hash = if options.skip_duplicates {
             Some(hashing::fast_hash(&file.path, file.size)?)
@@ -135,7 +151,7 @@ pub fn build_plan_sync(
                     let sidecar_name = candidate.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let sidecar_dest = resolve_collision(dest_dir, &sidecar_name);
+                    let sidecar_dest = resolve_collision(dest_dir, &sidecar_name, &mut claimed);
                     let sidecar_size = candidate.metadata().map(|m| m.len()).unwrap_or(0);
                     sidecar_ops.push(IngestOperation {
                         source_path: candidate_str,
@@ -203,41 +219,61 @@ pub fn parse_date_for_path(date_str: &str) -> Option<String> {
     }
 }
 
-pub fn resolve_collision(dir: &Path, filename: &str) -> std::path::PathBuf {
+/// Pick a destination path for `filename` inside `dir` that collides with
+/// neither an existing file on disk nor a path already claimed earlier in this
+/// plan. The chosen path is recorded in `claimed`.
+///
+/// Keys are lower-cased because the common targets (APFS, exFAT, NTFS) are
+/// case-insensitive, so `IMG_1.JPG` and `img_1.jpg` are the same file there.
+pub fn resolve_collision(
+    dir: &Path,
+    filename: &str,
+    claimed: &mut HashSet<String>,
+) -> std::path::PathBuf {
+    let take = |path: std::path::PathBuf, claimed: &mut HashSet<String>| {
+        claimed.insert(path.to_string_lossy().to_lowercase());
+        path
+    };
+
+    let is_free = |path: &Path, claimed: &HashSet<String>| {
+        !path.exists() && !claimed.contains(&path.to_string_lossy().to_lowercase())
+    };
+
     let dest_path = dir.join(filename);
-    
-    if !dest_path.exists() {
-        return dest_path;
+    if is_free(&dest_path, claimed) {
+        return take(dest_path, claimed);
     }
-    
+
     let stem = Path::new(filename)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    
+
     let ext = Path::new(filename)
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_default();
-    
-    let mut counter = 1;
-    loop {
-        let new_name = if ext.is_empty() {
-            format!("{}_{}", stem, counter)
+
+    let build = |suffix: &str| -> String {
+        if ext.is_empty() {
+            format!("{}_{}", stem, suffix)
         } else {
-            format!("{}_{}.{}", stem, counter, ext)
-        };
-        
-        let new_path = dir.join(&new_name);
-        if !new_path.exists() {
-            return new_path;
+            format!("{}_{}.{}", stem, suffix, ext)
         }
-        
-        counter += 1;
-        if counter > 9999 {
-            break;
+    };
+
+    for counter in 1..=9999 {
+        let new_path = dir.join(build(&counter.to_string()));
+        if is_free(&new_path, claimed) {
+            return take(new_path, claimed);
         }
     }
-    
-    dir.join(filename)
+
+    // Pathological case (10k same-named files in one folder): fall back to a
+    // timestamp suffix rather than returning a path that would clobber another.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_else(|_| "dup".to_string());
+    take(dir.join(build(&unique)), claimed)
 }

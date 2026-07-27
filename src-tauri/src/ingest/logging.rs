@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -90,10 +90,60 @@ pub fn save_log(
 
     log::info!("Log saved to {:?}", log_file);
 
+    // Persist hashes *before* rotating, so rotation can never discard the only
+    // record of a previously-ingested file.
+    if let Err(e) = update_hash_index(dest_root, entries) {
+        log::warn!("Failed to update dedup index: {}", e);
+    }
+
     rotate_logs(&log_dir);
 
 
     Ok(log_file.to_string_lossy().to_string())
+}
+
+fn index_path(dest_root: &str) -> PathBuf {
+    Path::new(dest_root).join(".ingst").join("index.json")
+}
+
+fn read_index(path: &Path) -> HashMap<String, String> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+/// Merge this run's hashes into the persistent dedup index.
+///
+/// The index lives outside the rotating logs on purpose: `rotate_logs` keeps
+/// only the newest MAX_LOGS files, so an index derived from logs alone would
+/// silently forget older ingests and re-import those files as new.
+pub fn update_hash_index(
+    dest_root: &str,
+    entries: &[LogEntry],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = index_path(dest_root);
+    let mut index = read_index(&path);
+
+    for entry in entries {
+        if entry.status == "success" || entry.status == "skipped" {
+            if let Some(hash) = &entry.hash {
+                index.insert(hash.clone(), entry.dest_path.clone());
+            }
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Write-then-rename so an interrupted write can't truncate the index.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string(&index)?)?;
+    fs::rename(&tmp, &path)?;
+
+    log::info!("Dedup index now holds {} hashes", index.len());
+    Ok(())
 }
 
 /// Keep only the most recent MAX_LOGS log files; delete the rest.
@@ -128,27 +178,27 @@ fn rotate_logs(log_dir: &Path) {
 }
 
 pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, String> {
-    let mut hashes = HashMap::new();
-    
+    let mut hashes = read_index(&index_path(dest_root));
+    let from_index = hashes.len();
+
+    // Also fold in whatever the surviving logs know. This migrates libraries
+    // created before the index existed, and costs nothing once it is populated.
     let log_dir = Path::new(dest_root)
         .join(".ingst")
         .join("logs");
-    
-    if !log_dir.exists() {
-        return hashes;
-    }
-    
-    if let Ok(entries) = fs::read_dir(&log_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(log) = serde_json::from_str::<IngestLog>(&content) {
-                        for entry in log.entries {
-                            if entry.status == "success" || entry.status == "skipped" {
-                                if let Some(hash) = entry.hash {
-                                    // Use hash as key, store source path
-                                    hashes.insert(hash, entry.source_path);
+
+    if log_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&log_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(log) = serde_json::from_str::<IngestLog>(&content) {
+                            for entry in log.entries {
+                                if entry.status == "success" || entry.status == "skipped" {
+                                    if let Some(hash) = entry.hash {
+                                        hashes.entry(hash).or_insert(entry.source_path);
+                                    }
                                 }
                             }
                         }
@@ -157,7 +207,12 @@ pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, String> {
             }
         }
     }
-    
-    log::info!("Loaded {} existing hashes from logs", hashes.len());
+
+    log::info!(
+        "Loaded {} existing hashes ({} from index, {} recovered from logs)",
+        hashes.len(),
+        from_index,
+        hashes.len() - from_index
+    );
     hashes
 }

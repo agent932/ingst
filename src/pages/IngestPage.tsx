@@ -35,36 +35,57 @@ export default function IngestPage() {
     setProgress,
     setIngestResult,
     setIsIngesting,
+    setIngestStarted,
     isIngesting,
+    ingestResult,
     nextStep,
   } = useStore();
-  
+
   const [error, setError] = useState<string | null>(null);
-  const [isComplete, setIsComplete] = useState(false);
+  const [sawCompleteEvent, setSawCompleteEvent] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const lastProgressRef = useRef<ProgressEvent | null>(null);
   const lastUpdateRef = useRef<number>(0);
 
+  // Derived rather than local-only, so returning to this step after the
+  // transfer finished still shows the completed state.
+  const isComplete =
+    sawCompleteEvent || ingestResult !== null || progress?.status === 'complete';
+
   useEffect(() => {
-    startIngest();
-    
-    const unlisten = listen<ProgressEvent>('ingest-progress', (event) => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+
+    listen<ProgressEvent>('ingest-progress', (event) => {
       // Throttle updates to every 100ms for smooth UI
       const now = Date.now();
       if (now - lastUpdateRef.current < 100 && event.payload.status !== 'complete') {
-        lastProgressRef.current = event.payload;
         return;
       }
       lastUpdateRef.current = now;
-      
+
       setProgress(event.payload);
       if (event.payload.status === 'complete') {
-        setIsComplete(true);
+        setSawCompleteEvent(true);
+      }
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+
+      // Launch the transfer at most once per plan. Guards both StrictMode's
+      // double-mount in dev and navigating back to this step later, either of
+      // which would otherwise re-run the entire ingest over the same files.
+      if (!useStore.getState().ingestStarted) {
+        setIngestStarted(true);
+        startIngest();
       }
     });
-    
+
     return () => {
-      unlisten.then(fn => fn());
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 

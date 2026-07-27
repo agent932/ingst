@@ -92,15 +92,23 @@ fn extract_video_metadata_sync(
             let capture_date = tags
                 .and_then(|t| t.get("creation_time"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            // QuickTime metadata keys are `com.apple.quicktime.*`. Cameras that
+            // write plain MP4 tags (DJI, GoPro, Android) use the bare keys.
             let device_name = tags
-                .and_then(|t| t.get("com.apple.quicktools.creator.0"))
-                .or_else(|| tags.and_then(|t| t.get("com.apple.quicktools.make")))
-                .or_else(|| tags.and_then(|t| t.get("com.apple.quicktools.model")))
+                .and_then(|t| {
+                    t.get("com.apple.quicktime.model")
+                        .or_else(|| t.get("com.apple.quicktime.make"))
+                        .or_else(|| t.get("model"))
+                        .or_else(|| t.get("make"))
+                        .or_else(|| t.get("device_model"))
+                })
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
             return (capture_date, device_name);
         }
     }

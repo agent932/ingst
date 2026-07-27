@@ -12,7 +12,7 @@ const steps = [
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { currentStep, setCurrentStep, theme, setTheme, sources, destination, ingestPlan, ingestResult } = useStore();
+  const { currentStep, setCurrentStep, theme, setTheme, sources, destination, ingestPlan, ingestResult, isIngesting } = useStore();
   const [showSettings, setShowSettings] = useState(false);
 
   const hasSources = sources.length > 0;
@@ -22,6 +22,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   // A step is reachable if its prerequisites are met OR the user has already been there.
   function isStepReachable(stepNumber: number): boolean {
+    // Pin the user to the Ingest step while files are in flight — leaving it
+    // would hide a transfer that is still running in the background.
+    if (isIngesting) {
+      return stepNumber === currentStep;
+    }
+
     switch (stepNumber) {
       case 1: return true;
       case 2: return hasSources;
