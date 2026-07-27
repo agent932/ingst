@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useStore, Source } from '../store/useStore';
 import { formatSize } from '../utils/formatters';
+import Modal from '../components/Modal';
 
 interface SourceScanResult {
   source: Source;
@@ -185,51 +186,47 @@ export default function SourcesPage() {
 
       {/* Detected Volumes Modal */}
       {showVolumes && volumes.length > 0 && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="card w-full max-w-md p-6">
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Detected Volumes</h2>
-            <div className="space-y-2 mb-4 max-h-64 overflow-y-auto">
-              {volumes.map((volume) => (
-                <button
-                  key={volume.path}
-                  onClick={() => handleAddVolume(volume)}
-                  className="w-full p-3 text-left rounded-lg border border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-medium text-gray-900 dark:text-white">{volume.name}</p>
-                      <p className="text-sm text-gray-500 dark:text-gray-400 font-mono">{volume.path}</p>
-                    </div>
-                    <div className="text-right text-sm text-gray-500">
-                      <p>{formatSize(volume.free_space)} free</p>
-                    </div>
+        <Modal>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Detected Volumes</h2>
+          <div className="space-y-2 mb-4 max-h-64 overflow-y-auto">
+            {volumes.map((volume) => (
+              <button
+                key={volume.path}
+                onClick={() => handleAddVolume(volume)}
+                className="w-full p-3 text-left rounded-lg border border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-gray-900 dark:text-white">{volume.name}</p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 font-mono">{volume.path}</p>
                   </div>
-                </button>
-              ))}
-            </div>
-            <div className="flex justify-end">
-              <button onClick={() => { setShowVolumes(false); setVolumes([]); }} className="btn btn-secondary">
-                Cancel
+                  <div className="text-right text-sm text-gray-500">
+                    <p>{formatSize(volume.free_space)} free</p>
+                  </div>
+                </div>
               </button>
-            </div>
+            ))}
           </div>
-        </div>
+          <div className="flex justify-end">
+            <button onClick={() => { setShowVolumes(false); setVolumes([]); }} className="btn btn-secondary">
+              Cancel
+            </button>
+          </div>
+        </Modal>
       )}
 
       {showVolumes && volumes.length === 0 && !detecting && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="card w-full max-w-md p-6">
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">No SD Cards Found</h2>
-            <p className="text-gray-600 dark:text-gray-400 mb-4">
-              No removable volumes were detected. Make sure your SD card or USB drive is connected.
-            </p>
-            <div className="flex justify-end">
-              <button onClick={() => { setShowVolumes(false); setVolumes([]); }} className="btn btn-secondary">
-                Close
-              </button>
-            </div>
+        <Modal>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">No SD Cards Found</h2>
+          <p className="text-gray-600 dark:text-gray-400 mb-4">
+            No removable volumes were detected. Make sure your SD card or USB drive is connected.
+          </p>
+          <div className="flex justify-end">
+            <button onClick={() => { setShowVolumes(false); setVolumes([]); }} className="btn btn-secondary">
+              Close
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {sources.length > 0 && (

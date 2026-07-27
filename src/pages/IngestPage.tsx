@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useStore, IngestResult, ProgressEvent } from '../store/useStore';
 import { formatSize } from '../utils/formatters';
+import { getFileName } from '../utils/paths';
 
 
 function formatTime(secs: number): string {
@@ -14,10 +15,6 @@ function formatTime(secs: number): string {
     return `${hours}:${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   }
   return `${mins}:${s.toString().padStart(2, '0')}`;
-}
-
-function getFileName(path: string): string {
-  return path.split('/').pop() || path;
 }
 
 function getFolderName(path: string): string {

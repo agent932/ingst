@@ -2,12 +2,18 @@ import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore, IngestPlan } from '../store/useStore';
 import { formatSize } from '../utils/formatters';
+import { getFileName } from '../utils/paths';
 
 
-function getFileName(path: string): string {
-  return path.split('/').pop() || path;
-}
-
+// MIRROR of the video/audio rows in `src-tauri/src/ingest/formats.rs`
+// (MEDIA_FORMATS) — the backend is the source of truth. Adding a camera format
+// there means adding it here too, if it is video or audio.
+//
+// This is deliberately not fetched from the backend: the result only chooses
+// the placeholder icon drawn behind a missing thumbnail, and it falls through
+// to 'photo' for anything unrecognized. Routing it through a Tauri command
+// would make a decorative icon depend on an async round trip and force a
+// loading state into every table row, for no visible gain.
 function getFileType(path: string): string {
   const ext = (path.split('.').pop() || '').toLowerCase();
   if (['mp4', 'mov', 'mxf', 'avi', 'mkv'].includes(ext)) return 'video';

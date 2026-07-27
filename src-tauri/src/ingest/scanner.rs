@@ -1,12 +1,9 @@
+use crate::ingest::formats::{self, MediaKind};
 use crate::{ScannedFile, SourcePath, SourceScanResult};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::time::SystemTime;
 use walkdir::WalkDir;
-
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mxf", "avi", "mkv"];
-const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "aac"];
-const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "braw", "r3d", "arw", "cr2", "nef", "dng"];
 
 pub async fn scan_directory(source: &SourcePath) -> Result<SourceScanResult, Box<dyn std::error::Error + Send + Sync>> {
     let source = source.clone();
@@ -95,25 +92,22 @@ pub fn scan_directory_sync(source: &SourcePath) -> Result<SourceScanResult, Box<
             continue;
         }
         
-        let extension = file_path
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        
-        let file_type = if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
-            video_count += 1;
-            "video"
-        } else if PHOTO_EXTENSIONS.contains(&extension.as_str()) {
-            photo_count += 1;
-            "photo"
-        } else if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
-            audio_count += 1;
-            "audio"
-        } else {
-            other_count += 1;
-            continue;
+        // Anything not in the format registry is left on the card.
+        let format = match formats::classify(file_path) {
+            Some(f) => f,
+            None => {
+                other_count += 1;
+                continue;
+            }
         };
-        
+
+        match format.kind {
+            MediaKind::Video => video_count += 1,
+            MediaKind::Photo => photo_count += 1,
+            MediaKind::Audio => audio_count += 1,
+        }
+        let file_type = format.kind.as_str();
+
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,

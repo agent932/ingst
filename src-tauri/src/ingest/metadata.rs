@@ -1,3 +1,4 @@
+use crate::ingest::formats::{self, MetadataSource};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -16,20 +17,13 @@ pub fn extract_metadata_sync(
     file_path: &Path,
     _fallback_time: SystemTime,
 ) -> (Option<String>, Option<String>) {
-    let extension = file_path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    
-    if ["jpg", "jpeg", "png", "arw", "cr2", "nef", "dng"].contains(&extension.as_str()) {
-        return extract_photo_metadata_sync(file_path);
+    match formats::classify(file_path).map(|f| f.metadata) {
+        Some(MetadataSource::Exif) => extract_photo_metadata_sync(file_path),
+        Some(MetadataSource::Ffprobe) => extract_video_metadata_sync(file_path),
+        // Audio, the proprietary RAW containers, and non-media files have no
+        // reader; the caller falls back to the filename timestamp.
+        _ => (None, None),
     }
-    
-    if ["mp4", "mov", "mxf", "avi", "mkv"].contains(&extension.as_str()) {
-        return extract_video_metadata_sync(file_path);
-    }
-    
-    (None, None)
 }
 
 fn extract_photo_metadata_sync(

@@ -223,8 +223,9 @@ pub struct MountedVolume {
     pub free_space: u64,
 }
 
-/// Returns a base64 `data:image/jpeg;base64,…` thumbnail for JPEG/PNG files,
-/// or `null` for unsupported types (RAW, video, etc.).
+/// Returns a base64 `data:image/jpeg;base64,…` thumbnail, or `null` for formats
+/// with no thumbnail source. See `ingest::formats::MEDIA_FORMATS` for which is
+/// which.
 #[tauri::command]
 pub async fn get_thumbnail(path: String) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || generate_thumbnail(&path))
@@ -233,14 +234,14 @@ pub async fn get_thumbnail(path: String) -> Result<Option<String>, String> {
 }
 
 fn generate_thumbnail(path: &str) -> Result<Option<String>, String> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    use crate::ingest::formats::{self, ThumbnailSource};
 
-    match ext.as_str() {
-        "jpg" | "jpeg" | "png" => generate_photo_thumbnail(path),
-        "mp4" | "mov" | "mxf" | "avi" | "mkv" => generate_video_thumbnail(path),
+    let format = formats::classify(std::path::Path::new(path));
+
+    match format.map(|f| f.thumbnail) {
+        Some(ThumbnailSource::Image) => generate_photo_thumbnail(path),
+        Some(ThumbnailSource::Ffmpeg) => generate_video_thumbnail(path),
+        // RAW stills, audio, and non-media files get the type icon instead.
         _ => Ok(None),
     }
 }
