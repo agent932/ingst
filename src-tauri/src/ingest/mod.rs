@@ -1,3 +1,4 @@
+pub mod formats;
 pub mod scanner;
 pub mod metadata;
 pub mod plan;
