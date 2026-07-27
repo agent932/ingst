@@ -242,6 +242,10 @@ where
                 "processing",
             );
 
+            // Whole-file hash of anything actually transferred, recorded so a
+            // later run can confirm a duplicate without re-reading the library.
+            let mut full_hash: Option<String> = None;
+
             // Ok(true)  → bytes were actually transferred
             // Ok(false) → intentionally skipped, nothing written
             let result: Result<bool, Box<dyn std::error::Error + Send + Sync>> =
@@ -259,8 +263,12 @@ where
                         })
                         .await
                         {
-                            Ok(inner) => inner.map(|()| true),
-                            Err(e)    => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+                            Ok(Ok(hash)) => {
+                                full_hash = Some(hash);
+                                Ok(true)
+                            }
+                            Ok(Err(e)) => Err(e),
+                            Err(e)     => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                         }
                     }
                     "move" => {
@@ -275,8 +283,12 @@ where
                         })
                         .await
                         {
-                            Ok(inner) => inner.map(|()| true),
-                            Err(e)    => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+                            Ok(Ok(hash)) => {
+                                full_hash = hash;
+                                Ok(true)
+                            }
+                            Ok(Err(e)) => Err(e),
+                            Err(e)     => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                         }
                     }
                     _ => Ok(false),
@@ -293,19 +305,21 @@ where
                 Ok(true) => {
                     success_count_c.fetch_add(1, Ordering::SeqCst);
                     bytes_copied_c.fetch_add(op.size, Ordering::SeqCst);
+                    let mut entry = create_log_entry(
+                        &op.source_path,
+                        &op.dest_path,
+                        op.size,
+                        op.hash.clone(),
+                        op.capture_date.clone(),
+                        op.device_name.clone(),
+                        "success",
+                        None,
+                    );
+                    entry.full_hash = full_hash.clone();
                     log_entries_c
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push(create_log_entry(
-                            &op.source_path,
-                            &op.dest_path,
-                            op.size,
-                            op.hash.clone(),
-                            op.capture_date.clone(),
-                            op.device_name.clone(),
-                            "success",
-                            None,
-                        ));
+                        .push(entry);
                 }
                 Ok(false) => {
                     skipped_count_c.fetch_add(1, Ordering::SeqCst);
@@ -447,7 +461,7 @@ fn copy_verified(
     bytes_tracker: Arc<AtomicU64>,
     verifying: Arc<AtomicBool>,
     hashed: Arc<AtomicU64>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let dest_path = Path::new(dest);
 
     if let Some(parent) = dest_path.parent() {
@@ -486,7 +500,10 @@ fn copy_verified(
     }
 
     std::fs::rename(&temp_path, dest_path)?;
-    Ok(())
+
+    // Returned so the log and dedup index can record it: a stored whole-file
+    // hash lets a later run confirm a duplicate by reading only the source.
+    Ok(src_hash)
 }
 
 /// Copy `source` to `dest`, returning the SHA-256 of the bytes as they stream past.
@@ -542,7 +559,7 @@ fn move_file_with_progress(
     bytes_tracker: Arc<AtomicU64>,
     verifying: Arc<AtomicBool>,
     hashed: Arc<AtomicU64>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     let source_path = Path::new(source);
     let dest_path   = Path::new(dest);
 
@@ -550,19 +567,20 @@ fn move_file_with_progress(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Try rename first (fast, same volume, and already atomic).
+    // Try rename first (fast, same volume, and already atomic). Nothing is read,
+    // so there is no whole-file hash to report.
     if std::fs::rename(source_path, dest_path).is_ok() {
         let size = dest_path.metadata().map(|m| m.len()).unwrap_or(0);
         bytes_tracker.store(size, Ordering::SeqCst);
-        return Ok(());
+        return Ok(None);
     }
 
     // Cross-volume: copy through .part and verify before touching the original,
     // so a failure anywhere leaves the source intact.
-    copy_verified(source, dest, bytes_tracker, verifying, hashed)?;
+    let hash = copy_verified(source, dest, bytes_tracker, verifying, hashed)?;
     std::fs::remove_file(source_path)?;
 
-    Ok(())
+    Ok(Some(hash))
 }
 
 #[cfg(test)]

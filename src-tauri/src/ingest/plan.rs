@@ -48,7 +48,7 @@ pub fn build_plan_sync(
     let dest_root = Path::new(&options.dest_root);
 
     let mut operations: Vec<IngestOperation> = Vec::new();
-    let mut seen_hashes: HashMap<String, String> = HashMap::new();
+    let mut seen_hashes: HashMap<String, logging::IndexEntry> = HashMap::new();
     let mut duplicate_count = 0;
 
     // Destination paths already handed out during this plan. Without this, two
@@ -107,12 +107,21 @@ pub fn build_plan_sync(
         
         let action = if options.skip_duplicates {
             if let Some(ref hash_val) = hash {
-                if seen_hashes.get(hash_val).is_some() {
-                    duplicate_count += 1;
-                    "skip".to_string()
-                } else {
-                    seen_hashes.insert(hash_val.clone(), file.path.clone());
-                    options.operation.clone()
+                match seen_hashes.get(hash_val) {
+                    Some(known) if is_confirmed_duplicate(&file.path, known) => {
+                        duplicate_count += 1;
+                        "skip".to_string()
+                    }
+                    _ => {
+                        seen_hashes.insert(
+                            hash_val.clone(),
+                            logging::IndexEntry {
+                                path: file.path.clone(),
+                                full_hash: None,
+                            },
+                        );
+                        options.operation.clone()
+                    }
                 }
             } else {
                 options.operation.clone()
@@ -200,6 +209,39 @@ pub fn build_plan_sync(
         total_size,
         duplicate_count,
     })
+}
+
+/// Confirm a fingerprint hit by comparing whole files.
+///
+/// `fast_hash` samples only the head, the tail and the length, so a match is a
+/// candidate rather than proof — two files agreeing on all three but differing
+/// in between produce the same fingerprint. Skipping on that alone silently
+/// drops footage the user believes was imported, so the bytes are compared in
+/// full before anything is declared a duplicate.
+///
+/// Anything that cannot be confirmed is treated as new: copying a redundant
+/// file wastes space, failing to copy one loses it.
+fn is_confirmed_duplicate(source: &str, known: &logging::IndexEntry) -> bool {
+    let source_full = match hashing::full_hash(source) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("Could not hash {} to confirm duplicate: {}", source, e);
+            return false;
+        }
+    };
+
+    // Entries recorded since full hashes were stored need no second read.
+    if let Some(recorded) = &known.full_hash {
+        return &source_full == recorded;
+    }
+
+    // Older entries, and same-volume moves that renamed without reading the
+    // bytes, fall back to hashing the file the index points at. If it has been
+    // moved or deleted, treat the source as new.
+    match hashing::full_hash(&known.path) {
+        Ok(other) => source_full == other,
+        Err(_) => false,
+    }
 }
 
 /// Map each directory to the device name most commonly reported by the files

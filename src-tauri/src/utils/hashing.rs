@@ -4,33 +4,48 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Bytes sampled from each end of a file by [`fast_hash`].
+const SAMPLE_WINDOW: u64 = 64 * 1024;
+
+/// Cheap content fingerprint: head window, tail window, and exact length.
+///
+/// This is a *candidate lookup key*, not proof of equality — any two files
+/// sharing both windows and a length collide, because the middle is never
+/// read. A caller must confirm a hit with [`full_hash`] before treating a file
+/// as already ingested; acting on the fingerprint alone means real footage is
+/// silently never copied. See `plan::is_confirmed_duplicate`.
 pub fn fast_hash(path: &str, size: u64) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let path = Path::new(path);
-    
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+
+    let mut file = File::open(path)?;
+    let file_size = file.metadata()?.len();
 
     let mut hasher = Sha256::new();
 
-    let header_size = 64 * 1024;
-    let mut header_buf = vec![0u8; header_size];
-    let bytes_read = reader.read(&mut header_buf)?;
-    hasher.update(&header_buf[..bytes_read]);
+    // `Read::read` may return fewer bytes than requested, which previously made
+    // the fingerprint depend on how the filesystem happened to chunk the read.
+    // `read_exact` removes that.
+    let head_len = file_size.min(SAMPLE_WINDOW);
+    let mut head = vec![0u8; head_len as usize];
+    file.read_exact(&mut head)?;
+    hasher.update(&head);
 
-    // Read footer from the same file handle — no second open needed.
-    let file_size = path.metadata()?.len();
-    if file_size > header_size as u64 * 2 {
-        if reader.seek(SeekFrom::End(-(64 * 1024) as i64)).is_ok() {
-            let mut footer_buf = vec![0u8; 64 * 1024];
-            let bytes_read = reader.read(&mut footer_buf)?;
-            hasher.update(&footer_buf[..bytes_read]);
-        }
+    // Sample the tail whenever the file extends past the head window. The old
+    // guard required `file_size > SAMPLE_WINDOW * 2`, so files between 64 KiB
+    // and 128 KiB were fingerprinted from their first 64 KiB and length alone —
+    // every byte after that, including the last, was invisible. The windows may
+    // overlap for such files; hashing the overlap is harmless.
+    if file_size > SAMPLE_WINDOW {
+        let tail_len = file_size.min(SAMPLE_WINDOW);
+        let mut tail = vec![0u8; tail_len as usize];
+        file.seek(SeekFrom::End(-(tail_len as i64)))?;
+        file.read_exact(&mut tail)?;
+        hasher.update(&tail);
     }
-    
+
     hasher.update(size.to_le_bytes());
-    
-    let result = hasher.finalize();
-    Ok(hex::encode(result))
+
+    Ok(hex::encode(hasher.finalize()))
 }
 
 pub fn full_hash(path: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

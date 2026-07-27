@@ -11,11 +11,38 @@ pub struct LogEntry {
     pub source_path: String,
     pub dest_path: String,
     pub size: u64,
+    /// Sampled fingerprint from `fast_hash` — a lookup key, not proof of equality.
     pub hash: Option<String>,
+    /// SHA-256 of the whole file, computed during the copy. Absent on entries
+    /// written before this was recorded, on skips, and on same-volume moves,
+    /// which rename without reading the bytes.
+    #[serde(default)]
+    pub full_hash: Option<String>,
     pub capture_datetime: Option<String>,
     pub device_name: String,
     pub status: String,
     pub error: Option<String>,
+}
+
+/// What the dedup index remembers about a file that has been ingested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexEntry {
+    /// A file known to carry this fingerprint: the copy in the library for
+    /// persisted entries, or the source file for duplicates found within a
+    /// single run, where nothing has been written yet.
+    pub path: String,
+    #[serde(default)]
+    pub full_hash: Option<String>,
+}
+
+/// On-disk shapes the index has had. The original stored a bare
+/// `hash -> dest_path` string map; reading it lets existing libraries keep
+/// their dedup history instead of re-importing everything once.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredIndex {
+    Current(HashMap<String, IndexEntry>),
+    Legacy(HashMap<String, String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +77,7 @@ pub fn create_log_entry(
         dest_path: dest_path.to_string(),
         size,
         hash,
+        full_hash: None,
         capture_datetime,
         device_name,
         status: status.to_string(),
@@ -106,11 +134,23 @@ fn index_path(dest_root: &str) -> PathBuf {
     Path::new(dest_root).join(".ingst").join("index.json")
 }
 
-fn read_index(path: &Path) -> HashMap<String, String> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default()
+fn read_index(path: &Path) -> HashMap<String, IndexEntry> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    match serde_json::from_str::<StoredIndex>(&content) {
+        Ok(StoredIndex::Current(map)) => map,
+        Ok(StoredIndex::Legacy(map)) => map
+            .into_iter()
+            .map(|(hash, path)| (hash, IndexEntry { path, full_hash: None }))
+            .collect(),
+        Err(e) => {
+            log::warn!("Could not read dedup index at {:?}: {}", path, e);
+            HashMap::new()
+        }
+    }
 }
 
 /// Merge this run's hashes into the persistent dedup index.
@@ -128,7 +168,17 @@ pub fn update_hash_index(
     for entry in entries {
         if entry.status == "success" || entry.status == "skipped" {
             if let Some(hash) = &entry.hash {
-                index.insert(hash.clone(), entry.dest_path.clone());
+                // A skip records no full hash, so keep whichever one is already
+                // stored rather than blanking it and forcing later runs back
+                // onto the slower confirm-by-reading-the-library path.
+                let retained = index.get(hash).and_then(|e| e.full_hash.clone());
+                index.insert(
+                    hash.clone(),
+                    IndexEntry {
+                        path: entry.dest_path.clone(),
+                        full_hash: entry.full_hash.clone().or(retained),
+                    },
+                );
             }
         }
     }
@@ -177,7 +227,7 @@ fn rotate_logs(log_dir: &Path) {
     }
 }
 
-pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, String> {
+pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, IndexEntry> {
     let mut hashes = read_index(&index_path(dest_root));
     let from_index = hashes.len();
 
@@ -197,7 +247,10 @@ pub fn load_existing_hashes(dest_root: &str) -> HashMap<String, String> {
                             for entry in log.entries {
                                 if entry.status == "success" || entry.status == "skipped" {
                                     if let Some(hash) = entry.hash {
-                                        hashes.entry(hash).or_insert(entry.source_path);
+                                        hashes.entry(hash).or_insert(IndexEntry {
+                                            path: entry.dest_path,
+                                            full_hash: entry.full_hash,
+                                        });
                                     }
                                 }
                             }

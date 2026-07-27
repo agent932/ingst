@@ -102,12 +102,16 @@ mod tests {
         assert_eq!(
             fast(&a, BIG as u64),
             fast(&b, BIG as u64),
-            "known blind spot: bytes between the head and tail windows are never read"
+            "inherent to sampling: bytes between the head and tail windows are \
+             never read. This is why a fingerprint match is only a candidate — \
+             plan::is_confirmed_duplicate compares whole files before skipping, \
+             so a collision here costs a redundant read, not lost footage."
         );
 
-        // Between 64 KiB and 128 KiB there is no tail read at all, so everything
-        // past the first 64 KiB is unsampled — the blind spot reaches the end of
-        // the file.
+        // Files of 64 KiB..=128 KiB used to read no tail window at all, because
+        // the guard demanded `size > window * 2`. Everything past the first
+        // 64 KiB — including the final byte — was invisible, so two such files
+        // collided and one was silently skipped as a duplicate.
         const SMALL: usize = 100 * 1024;
         let c = dir.join("c.bin");
         let d = dir.join("d.bin");
@@ -115,11 +119,12 @@ mod tests {
         write_pattern(&d, SMALL, &[(SMALL - 1, 0xAA)]);
 
         assert_ne!(full(&c), full(&d), "the two files must really differ");
-        assert_eq!(
+        assert_ne!(
             fast(&c, SMALL as u64),
             fast(&d, SMALL as u64),
-            "known blind spot: under 128 KiB no tail window is read, so even the \
-             last byte of the file is invisible to fast_hash"
+            "a file in the 64..=128 KiB range differing only in its last byte \
+             must be distinguished: the tail window is now read whenever the \
+             file extends past the head window"
         );
 
         std::fs::remove_dir_all(&dir).ok();
