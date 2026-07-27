@@ -221,9 +221,206 @@ fn parse_exif_datetime(s: &str) -> Option<String> {
     if parts.len() != 2 {
         return None;
     }
-    
+
     let date_part = parts[0].replace(':', "-");
     let time_part = parts[1];
 
     Some(format!("{}T{}", date_part, time_part))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- timestamp_from_filename -----------------------------------------
+
+    /// The last resort for a card whose files carry no metadata at all. If the
+    /// stamp in the name is not read, every clip on that card is filed by the
+    /// date it was *copied*, so a shoot from last year lands in this month.
+    #[test]
+    fn timestamp_from_filename_reads_camera_stamps() {
+        assert_eq!(
+            timestamp_from_filename("VID_20260723_073020_002.mp4").as_deref(),
+            Some("2026-07-23T07:30:20")
+        );
+        assert_eq!(
+            timestamp_from_filename("IMG_20260723_072938_001.jpg").as_deref(),
+            Some("2026-07-23T07:29:38")
+        );
+        // No prefix at all.
+        assert_eq!(
+            timestamp_from_filename("20260723_073020.mov").as_deref(),
+            Some("2026-07-23T07:30:20")
+        );
+        // Pixel appends milliseconds to the time; the extra digits are noise.
+        assert_eq!(
+            timestamp_from_filename("PXL_20260723_073020123.jpg").as_deref(),
+            Some("2026-07-23T07:30:20")
+        );
+        // Date but no time: keep the date, which is what the folder needs.
+        assert_eq!(
+            timestamp_from_filename("20260723.jpg").as_deref(),
+            Some("2026-07-23T00:00:00")
+        );
+    }
+
+    /// Serial numbers and clip counters must never be mistaken for a date.
+    /// A misread here does not just mislabel one file: it invents a folder like
+    /// `1120/26/` and buries the footage where nobody thinks to look.
+    #[test]
+    fn timestamp_from_filename_rejects_serial_numbers() {
+        for name in [
+            "IMG_112026072312345.jpg", // long serial that contains a date-shaped run
+            "MVI_1234567890.MOV",
+            "DSC_0001.JPG",
+            "C0001.MP4",
+            "GX010042.MP4",
+            "100_0001.MOV",
+            "clip.mp4",
+        ] {
+            assert_eq!(
+                timestamp_from_filename(name),
+                None,
+                "{name:?} is not a timestamp and must not be read as one"
+            );
+        }
+    }
+
+    /// A digit run that looks like a date but cannot be one is a serial number,
+    /// not a capture time. Accepting it would file footage under an impossible
+    /// month — an unreachable folder for the user, and a wrong one forever.
+    #[test]
+    fn timestamp_from_filename_rejects_impossible_dates() {
+        for name in [
+            "VID_20261323_073020.mp4", // month 13
+            "VID_20260732_073020.mp4", // day 32
+            "VID_20260700_073020.mp4", // day 00
+            "VID_20260023_073020.mp4", // month 00
+            "VID_19891231_120000.mp4", // before the range cameras plausibly report
+            "VID_21010101_120000.mp4", // after it
+        ] {
+            assert_eq!(timestamp_from_filename(name), None, "{name:?} must be rejected");
+        }
+
+        // The edges of the accepted range still work.
+        assert_eq!(
+            timestamp_from_filename("VID_19900101_000000.mp4").as_deref(),
+            Some("1990-01-01T00:00:00")
+        );
+        assert_eq!(
+            timestamp_from_filename("VID_21001231_235959.mp4").as_deref(),
+            Some("2100-12-31T23:59:59")
+        );
+    }
+
+    /// A nonsense time must not throw away a perfectly good date — the folder
+    /// only needs YYYY/MM, so degrade to midnight rather than to "no date" and
+    /// a fallback on the copy date.
+    #[test]
+    fn timestamp_from_filename_keeps_the_date_when_the_time_is_impossible() {
+        assert_eq!(
+            timestamp_from_filename("VID_20260723_993020.mp4").as_deref(),
+            Some("2026-07-23T00:00:00")
+        );
+        assert_eq!(
+            timestamp_from_filename("VID_20260723_076099.mp4").as_deref(),
+            Some("2026-07-23T00:00:00")
+        );
+    }
+
+    // --- combine_make_model ----------------------------------------------
+
+    /// The device name becomes a folder name. Repeating the brand splits one
+    /// camera's work across "Canon EOS R5" and "Canon Canon EOS R5" folders;
+    /// dropping it leaves an unidentifiable "Luna Ultra".
+    #[test]
+    fn combine_make_model_adds_the_brand_only_when_missing() {
+        let combine = |a: &str, b: &str| combine_make_model(Some(a.into()), Some(b.into()));
+
+        assert_eq!(combine("Canon", "Canon EOS R5").as_deref(), Some("Canon EOS R5"));
+        assert_eq!(
+            combine("Insta360", "Luna Ultra").as_deref(),
+            Some("Insta360 Luna Ultra")
+        );
+        // Brand match is case-insensitive: EXIF casing is not consistent.
+        assert_eq!(combine("NIKON", "Nikon D850").as_deref(), Some("Nikon D850"));
+        assert_eq!(combine("SONY", "ILCE-7SM3").as_deref(), Some("SONY ILCE-7SM3"));
+    }
+
+    /// Cards where only one of the two EXIF fields is present still have to
+    /// yield a usable folder name rather than falling through to the card label.
+    #[test]
+    fn combine_make_model_handles_missing_fields() {
+        assert_eq!(combine_make_model(Some("DJI".into()), None).as_deref(), Some("DJI"));
+        assert_eq!(
+            combine_make_model(None, Some("DC-GH6".into())).as_deref(),
+            Some("DC-GH6")
+        );
+        assert_eq!(combine_make_model(None, None), None);
+    }
+
+    // --- parse_exif_datetime ---------------------------------------------
+
+    /// EXIF writes `2026:07:23 07:30:20`. Only the date's colons are separators
+    /// — replacing the ones in the time too produces `07-30-20`, which nothing
+    /// downstream can parse, and every photo would fall back to its file date.
+    #[test]
+    fn parse_exif_datetime_converts_only_the_date_separators() {
+        assert_eq!(
+            parse_exif_datetime("2026:07:23 07:30:20").as_deref(),
+            Some("2026-07-23T07:30:20")
+        );
+    }
+
+    /// Malformed EXIF is common on recovered or third-party-written files.
+    /// Returning a half-parsed string would put the file in a garbage folder;
+    /// returning None correctly falls back to the file's modified time.
+    #[test]
+    fn parse_exif_datetime_rejects_malformed_input() {
+        assert_eq!(parse_exif_datetime(""), None);
+        assert_eq!(parse_exif_datetime("2026:07:23"), None);
+        assert_eq!(parse_exif_datetime("2026:07:23 07:30:20 "), None);
+        assert_eq!(parse_exif_datetime("2026:07:23  07:30:20"), None);
+    }
+
+    // --- normalize_to_local ----------------------------------------------
+
+    /// ffprobe reports `creation_time` in UTC. A clip shot at 21:00 local on
+    /// the 31st is 04:00 UTC on the 1st, so leaving it unconverted files it in
+    /// the *next month's* folder, split from the stills of the same shoot.
+    #[test]
+    fn normalize_to_local_preserves_the_instant_and_drops_the_zone() {
+        use chrono::{Local, NaiveDateTime, TimeZone, Utc};
+
+        for (input, expected_utc) in [
+            ("2026-07-23T07:30:20Z", Utc.with_ymd_and_hms(2026, 7, 23, 7, 30, 20).unwrap()),
+            (
+                "2026-07-23T09:30:20+02:00",
+                Utc.with_ymd_and_hms(2026, 7, 23, 7, 30, 20).unwrap(),
+            ),
+        ] {
+            let out = normalize_to_local(input);
+            let naive = NaiveDateTime::parse_from_str(&out, "%Y-%m-%dT%H:%M:%S")
+                .unwrap_or_else(|e| panic!("{input:?} -> {out:?} is not plain local time: {e}"));
+            let as_local = Local
+                .from_local_datetime(&naive)
+                .single()
+                .expect("test instant must be unambiguous in the local zone");
+            assert_eq!(
+                as_local.with_timezone(&Utc),
+                expected_utc,
+                "{input:?} -> {out:?} moved the moment the clip was shot"
+            );
+        }
+    }
+
+    /// A timestamp with no zone is already local wall-clock time (EXIF), so it
+    /// must pass through untouched — shifting it by the UTC offset would move
+    /// evening shoots into the following day.
+    #[test]
+    fn normalize_to_local_leaves_zoneless_timestamps_alone() {
+        assert_eq!(normalize_to_local("2026-07-23T07:30:20"), "2026-07-23T07:30:20");
+        assert_eq!(normalize_to_local("2026-07-23 07:30:20"), "2026-07-23 07:30:20");
+        assert_eq!(normalize_to_local("not a timestamp"), "not a timestamp");
+    }
 }
