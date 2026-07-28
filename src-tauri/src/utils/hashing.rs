@@ -148,13 +148,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// DOCUMENTS A REAL LIMITATION.
+    /// REGRESSION GUARD for a fixed bug.
     ///
-    /// The tail is only sampled when the file is larger than 128 KiB, so for a
-    /// file between 64 KiB and 128 KiB everything after the first 64 KiB is
-    /// unhashed. That covers plenty of real stills, LUTs and subtitle files.
+    /// The tail used to be sampled only when a file exceeded 128 KiB, so for a
+    /// file between 64 KiB and 128 KiB everything after the first 64 KiB went
+    /// unhashed — plenty of real stills, LUTs and subtitle files. Two such files
+    /// collided and, with skip_duplicates on, one was never copied. The tail is
+    /// now read whenever a file extends past the head window.
     #[test]
-    fn fast_hash_ignores_everything_after_64k_in_a_100k_file() {
+    fn fast_hash_samples_the_tail_of_a_100k_file() {
         let dir = tmpdir("ingst_fast_hash_small");
 
         let size = 100 * 1024; // > CHUNK, but not > 2 * CHUNK
@@ -165,10 +167,10 @@ mod tests {
         let pa = write(&dir, "still_a.jpg", &a);
         let pb = write(&dir, "still_b.jpg", &b);
 
-        assert_eq!(
+        assert_ne!(
             fast_hash(&pa, size as u64).unwrap(),
             fast_hash(&pb, size as u64).unwrap(),
-            "known limitation: no tail sample below 128 KiB, so the end is unhashed"
+            "a difference in the final byte of a 64..=128 KiB file must be detected"
         );
 
         std::fs::remove_dir_all(&dir).ok();

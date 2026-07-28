@@ -151,9 +151,18 @@ pub fn build_plan_sync(
         .map(|o| o.source_path.as_str())
         .collect();
 
+    // Companions are matched by reading the directory once rather than probing
+    // constructed names. Probing was wrong twice over on case-insensitive
+    // filesystems (APFS, NTFS, exFAT): `A001.xmp` and `A001.XMP` both reported
+    // as existing, so every sidecar was planned twice and the second landed as
+    // `a001_1.xmp`; and because the stem was lower-cased to build the candidate,
+    // `A001.MP4`'s companion was filed as `a001.xmp`, breaking the name pairing
+    // an NLE relies on — or missed entirely on a case-sensitive source.
+    let mut seen_sidecars: HashSet<String> = HashSet::new();
+
     for op in operations.iter().filter(|o| o.action != "skip") {
         let src = Path::new(&op.source_path);
-        let stem = match src.file_stem().map(|s| s.to_string_lossy().to_lowercase()) {
+        let stem = match src.file_stem().map(|s| s.to_string_lossy().to_string()) {
             Some(s) => s,
             None => continue,
         };
@@ -163,28 +172,55 @@ pub fn build_plan_sync(
         };
         let dest_dir = Path::new(&op.dest_path).parent().unwrap_or(dest_root);
 
-        for ext in SIDECAR_EXTENSIONS {
-            // Try both lower and upper case extensions.
-            for case_ext in &[ext.to_string(), ext.to_uppercase()] {
-                let candidate = parent.join(format!("{}.{}", stem, case_ext));
-                let candidate_str = candidate.to_string_lossy().to_string();
-                if candidate.exists() && !ingested_paths.contains(candidate_str.as_str()) {
-                    let sidecar_name = candidate.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let sidecar_dest = resolve_collision(dest_dir, &sidecar_name, &mut claimed);
-                    let sidecar_size = candidate.metadata().map(|m| m.len()).unwrap_or(0);
-                    sidecar_ops.push(IngestOperation {
-                        source_path: candidate_str,
-                        dest_path: sidecar_dest.to_string_lossy().to_string(),
-                        action: "copy".to_string(), // always copy sidecars
-                        size: sidecar_size,
-                        capture_date: op.capture_date.clone(),
-                        device_name: op.device_name.clone(),
-                        hash: None,
-                    });
-                }
+        let entries = match std::fs::read_dir(parent) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let candidate = entry.path();
+
+            let matches_stem = candidate
+                .file_stem()
+                .map(|s| s.to_string_lossy().eq_ignore_ascii_case(&stem))
+                .unwrap_or(false);
+            let is_sidecar = candidate
+                .extension()
+                .map(|e| {
+                    let ext = e.to_string_lossy().to_lowercase();
+                    SIDECAR_EXTENSIONS.contains(&ext.as_str())
+                })
+                .unwrap_or(false);
+
+            if !matches_stem || !is_sidecar {
+                continue;
             }
+
+            let candidate_str = candidate.to_string_lossy().to_string();
+            if ingested_paths.contains(candidate_str.as_str())
+                || !seen_sidecars.insert(candidate_str.to_lowercase())
+            {
+                continue;
+            }
+
+            // The real directory entry, so the companion keeps the exact case
+            // its clip has.
+            let sidecar_name = match candidate.file_name() {
+                Some(n) => n.to_string_lossy().to_string(),
+                None => continue,
+            };
+            let sidecar_dest = resolve_collision(dest_dir, &sidecar_name, &mut claimed);
+            let sidecar_size = candidate.metadata().map(|m| m.len()).unwrap_or(0);
+
+            sidecar_ops.push(IngestOperation {
+                source_path: candidate_str,
+                dest_path: sidecar_dest.to_string_lossy().to_string(),
+                action: "copy".to_string(), // always copy sidecars
+                size: sidecar_size,
+                capture_date: op.capture_date.clone(),
+                device_name: op.device_name.clone(),
+                hash: None,
+            });
         }
     }
     operations.extend(sidecar_ops);
@@ -841,7 +877,6 @@ mod tests {
     /// It also inflates `total_files`/`total_size`, so the progress bar and the
     /// free-space check are both wrong.
     #[test]
-    #[ignore = "documents a real bug: sidecars are planned twice on case-insensitive filesystems"]
     fn each_sidecar_is_planned_exactly_once() {
         let root = tmpdir("ingst_plan_sidecar_once");
         let src = root.join("card");
@@ -899,7 +934,6 @@ mod tests {
     /// stop being linked. The same lower-casing means that on a case-sensitive
     /// *source* the sidecar is never found at all.
     #[test]
-    #[ignore = "documents a real bug: sidecar destination name is lower-cased, unlinking it from its clip"]
     fn sidecar_destination_keeps_the_clips_name_case() {
         let root = tmpdir("ingst_plan_sidecar_case_kept");
         let src = root.join("card");

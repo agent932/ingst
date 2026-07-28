@@ -288,6 +288,7 @@ mod tests {
             dest_path: format!("/library/2026/07/Card/{}", dest),
             size: 1024,
             hash: hash.map(|h| h.to_string()),
+            full_hash: None,
             capture_datetime: Some("2026-07-23T07:30:20".to_string()),
             device_name: "Card".to_string(),
             status: status.to_string(),
@@ -431,7 +432,7 @@ mod tests {
 
         let loaded = load_existing_hashes(&dest_root);
         assert_eq!(
-            loaded.get("same-hash").map(String::as_str),
+            loaded.get("same-hash").map(|e| e.path.as_str()),
             Some(shared.dest_path.as_str()),
             "the library location must not be overwritten by the source path"
         );
@@ -524,7 +525,7 @@ mod tests {
         assert_eq!(round_tripped.entries[0].hash.as_deref(), Some("saved-hash"));
         assert_eq!(round_tripped.sources, vec!["/Volumes/CARD".to_string()]);
 
-        let index: HashMap<String, String> = serde_json::from_str(
+        let index: HashMap<String, IndexEntry> = serde_json::from_str(
             &fs::read_to_string(root.join(".ingst").join("index.json")).unwrap(),
         )
         .unwrap();
