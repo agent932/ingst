@@ -1,4 +1,5 @@
 import { useStore } from '../store/useStore';
+import { getDirName } from '../utils/paths';
 
 export default function SummaryPage() {
   const { 
@@ -11,7 +12,7 @@ export default function SummaryPage() {
 
   const handleOpenLogFolder = async () => {
     if (ingestResult?.log_path) {
-      const logDir = ingestResult.log_path.split('/').slice(0, -1).join('/');
+      const logDir = getDirName(ingestResult.log_path);
       try {
         const { open } = await import('@tauri-apps/plugin-shell');
         await open(logDir);

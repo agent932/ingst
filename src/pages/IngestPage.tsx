@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useStore, IngestResult, ProgressEvent } from '../store/useStore';
 import { formatSize } from '../utils/formatters';
-import { getFileName } from '../utils/paths';
+import { getFileName, getFolderName } from '../utils/paths';
 
 
 function formatTime(secs: number): string {
@@ -17,10 +17,6 @@ function formatTime(secs: number): string {
   return `${mins}:${s.toString().padStart(2, '0')}`;
 }
 
-function getFolderName(path: string): string {
-  const parts = path.split('/');
-  return parts.length > 1 ? parts.slice(-2, -1)[0] || '' : '';
-}
 
 export default function IngestPage() {
   const { 
@@ -35,7 +31,10 @@ export default function IngestPage() {
     setIngestStarted,
     isIngesting,
     ingestResult,
+    sources,
     nextStep,
+    prevStep,
+    reset,
   } = useStore();
 
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +154,12 @@ export default function IngestPage() {
   const remainingBytes = progress ? progress.total_bytes - progress.bytes_copied : 0;
   const etaSecs = speed > 0 && remainingBytes > 0 ? Math.round(remainingBytes / (speed * 1024 * 1024)) : null;
   
+  const sourceNoun = sources.length === 1 ? 'source' : 'sources';
+
+  const handleStartOver = () => {
+    reset();
+  };
+
   const isVerifying = progress?.status === 'verifying';
   const wasCancelled = progress?.status === 'cancelled' || ingestResult?.cancelled === true;
 
@@ -171,14 +176,52 @@ export default function IngestPage() {
   };
 
   if (error) {
+    const filesDone = progress?.current_index ?? 0;
+
     return (
       <div className="max-w-3xl mx-auto">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Ingest Error</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Ingest Failed</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-1">
+            The transfer stopped before it finished
+          </p>
         </div>
-        
-        <div className="card p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400">
-          {error}
+
+        <div className="card p-4 mb-6 bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800">
+          <p className="text-sm font-mono text-red-700 dark:text-red-400 break-words">{error}</p>
+        </div>
+
+        <div className="card p-6 mb-6">
+          <h3 className="font-medium text-gray-900 dark:text-white mb-2">Your files are safe</h3>
+          <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1.5 list-disc pl-5">
+            <li>
+              Nothing was removed from your {sourceNoun}
+              {operation === 'move'
+                ? ' — a move only deletes the original once its copy has been verified'
+                : ' — this was a copy'}
+              .
+            </li>
+            <li>
+              Every file written was checksum-verified before being put in place, so
+              the library contains no half-copied files.
+            </li>
+            {filesDone > 0 && (
+              <li>
+                {filesDone} of {progress?.total ?? 0} file{filesDone === 1 ? '' : 's'} had
+                been processed. Going back rebuilds the plan, and anything already
+                copied will be recognised and skipped.
+              </li>
+            )}
+          </ul>
+        </div>
+
+        <div className="flex justify-between">
+          <button onClick={prevStep} className="btn btn-primary">
+            Back to Review
+          </button>
+          <button onClick={handleStartOver} className="btn btn-secondary">
+            Start Over
+          </button>
         </div>
       </div>
     );
