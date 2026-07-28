@@ -40,8 +40,9 @@ pub enum MetadataSource {
     Unsupported,
     /// EXIF, read in-process.
     Exif,
-    /// Container tags, read with the bundled `ffprobe` sidecar.
-    Ffprobe,
+    /// Container-level tags. Which reader supplies them is a platform detail;
+    /// see `ingest::video`.
+    Container,
 }
 
 /// How a preview thumbnail is produced, if at all.
@@ -51,8 +52,8 @@ pub enum ThumbnailSource {
     Unsupported,
     /// Decoded in-process with the `image` crate.
     Image,
-    /// One frame grabbed with the bundled `ffmpeg` sidecar.
-    Ffmpeg,
+    /// A frame decoded out of the video. See `ingest::video` for the backend.
+    VideoFrame,
 }
 
 /// One supported extension and everything Ingst knows about it.
@@ -72,11 +73,11 @@ pub struct MediaFormat {
 /// `exif` crate nor the `image` crate can open.
 pub const MEDIA_FORMATS: &[MediaFormat] = &[
     // Video — container tags via ffprobe, thumbnail frame via ffmpeg.
-    MediaFormat { extension: "mp4",  kind: MediaKind::Video, metadata: MetadataSource::Ffprobe,     thumbnail: ThumbnailSource::Ffmpeg },
-    MediaFormat { extension: "mov",  kind: MediaKind::Video, metadata: MetadataSource::Ffprobe,     thumbnail: ThumbnailSource::Ffmpeg },
-    MediaFormat { extension: "mxf",  kind: MediaKind::Video, metadata: MetadataSource::Ffprobe,     thumbnail: ThumbnailSource::Ffmpeg },
-    MediaFormat { extension: "avi",  kind: MediaKind::Video, metadata: MetadataSource::Ffprobe,     thumbnail: ThumbnailSource::Ffmpeg },
-    MediaFormat { extension: "mkv",  kind: MediaKind::Video, metadata: MetadataSource::Ffprobe,     thumbnail: ThumbnailSource::Ffmpeg },
+    MediaFormat { extension: "mp4",  kind: MediaKind::Video, metadata: MetadataSource::Container,     thumbnail: ThumbnailSource::VideoFrame },
+    MediaFormat { extension: "mov",  kind: MediaKind::Video, metadata: MetadataSource::Container,     thumbnail: ThumbnailSource::VideoFrame },
+    MediaFormat { extension: "mxf",  kind: MediaKind::Video, metadata: MetadataSource::Container,     thumbnail: ThumbnailSource::VideoFrame },
+    MediaFormat { extension: "avi",  kind: MediaKind::Video, metadata: MetadataSource::Container,     thumbnail: ThumbnailSource::VideoFrame },
+    MediaFormat { extension: "mkv",  kind: MediaKind::Video, metadata: MetadataSource::Container,     thumbnail: ThumbnailSource::VideoFrame },
 
     // Photo — EXIF in-process; only the web-ish formats can be decoded for a thumbnail.
     MediaFormat { extension: "jpg",  kind: MediaKind::Photo, metadata: MetadataSource::Exif,        thumbnail: ThumbnailSource::Image },

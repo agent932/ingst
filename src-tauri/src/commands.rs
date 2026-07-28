@@ -240,7 +240,7 @@ fn generate_thumbnail(path: &str) -> Result<Option<String>, String> {
 
     match format.map(|f| f.thumbnail) {
         Some(ThumbnailSource::Image) => generate_photo_thumbnail(path),
-        Some(ThumbnailSource::Ffmpeg) => generate_video_thumbnail(path),
+        Some(ThumbnailSource::VideoFrame) => generate_video_thumbnail(path),
         // RAW stills, audio, and non-media files get the type icon instead.
         _ => Ok(None),
     }
@@ -262,32 +262,24 @@ fn generate_photo_thumbnail(path: &str) -> Result<Option<String>, String> {
     Ok(Some(format!("data:image/jpeg;base64,{}", b64)))
 }
 
+/// Longest side of a generated thumbnail, in pixels.
+const THUMBNAIL_MAX_DIM: u32 = 160;
+
 fn generate_video_thumbnail(path: &str) -> Result<Option<String>, String> {
     use base64::{engine::general_purpose, Engine as _};
 
-    // Seek 1 second in, grab one frame, scale to 160px wide, emit as MJPEG on stdout.
-    // The seek is placed before -i for fast keyframe seek; if the clip is shorter
-    // than 1s ffmpeg will output nothing and we return None gracefully.
-    let output = std::process::Command::new(crate::utils::paths::ffmpeg_path())
-        .args([
-            "-ss", "1",
-            "-i", path,
-            "-vframes", "1",
-            "-vf", "scale=160:-2",
-            "-f", "mjpeg",
-            "-loglevel", "error",
-            "pipe:1",
-        ])
-        .output();
+    // No frame is an ordinary outcome, not an error: the clip may be shorter
+    // than the seek point, or the backend may not decode this codec. The UI
+    // falls back to a file-type icon.
+    let frame = crate::ingest::video::backend()
+        .thumbnail(std::path::Path::new(path), THUMBNAIL_MAX_DIM);
 
-    match output {
-        Ok(out) if !out.stdout.is_empty() => {
-            let b64 = general_purpose::STANDARD.encode(&out.stdout);
-            Ok(Some(format!("data:image/jpeg;base64,{}", b64)))
-        }
-        // ffmpeg not available or clip too short — fall back to icon
-        _ => Ok(None),
-    }
+    Ok(frame.map(|jpeg| {
+        format!(
+            "data:image/jpeg;base64,{}",
+            general_purpose::STANDARD.encode(&jpeg)
+        )
+    }))
 }
 
 /// Extract the mount point from a `df -k` line.

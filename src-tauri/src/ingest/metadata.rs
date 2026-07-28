@@ -19,7 +19,7 @@ pub fn extract_metadata_sync(
 ) -> (Option<String>, Option<String>) {
     match formats::classify(file_path).map(|f| f.metadata) {
         Some(MetadataSource::Exif) => extract_photo_metadata_sync(file_path),
-        Some(MetadataSource::Ffprobe) => extract_video_metadata_sync(file_path),
+        Some(MetadataSource::Container) => extract_video_metadata_sync(file_path),
         // Audio, the proprietary RAW containers, and non-media files have no
         // reader; the caller falls back to the filename timestamp.
         _ => (None, None),
@@ -96,48 +96,10 @@ fn combine_make_model(make: Option<String>, model: Option<String>) -> Option<Str
 fn extract_video_metadata_sync(
     file_path: &Path,
 ) -> (Option<String>, Option<String>) {
-    use std::process::Command;
-
-    let output = Command::new(crate::utils::paths::ffprobe_path())
-        .arg("-v")
-        .arg("quiet")
-        .arg("-print_format")
-        .arg("json")
-        .arg("-show_format")
-        .arg(file_path)
-        .output();
-    
-    if let Ok(output) = output {
-        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-            let tags = json.get("format")
-                .and_then(|f| f.get("tags"));
-            
-            let capture_date = tags
-                .and_then(|t| t.get("creation_time"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map(normalize_to_local);
-
-            // QuickTime metadata keys are `com.apple.quicktime.*`. Cameras that
-            // write plain MP4 tags (DJI, GoPro, Android) use the bare keys.
-            let device_name = tags
-                .and_then(|t| {
-                    t.get("com.apple.quicktime.model")
-                        .or_else(|| t.get("com.apple.quicktime.make"))
-                        .or_else(|| t.get("model"))
-                        .or_else(|| t.get("make"))
-                        .or_else(|| t.get("device_model"))
-                })
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            return (capture_date, device_name);
-        }
+    match crate::ingest::video::backend().info(file_path) {
+        Some(info) => (info.capture_date, info.device_name),
+        None => (None, None),
     }
-    
-    (None, None)
 }
 
 /// Convert a timezone-qualified timestamp to local wall-clock time.
@@ -147,7 +109,7 @@ fn extract_video_metadata_sync(
 /// clip and a still shot in the same minute can land in different YYYY/MM
 /// folders — an evening shoot on the 31st puts video in the following month.
 /// Timestamps without a zone are returned unchanged.
-fn normalize_to_local(ts: &str) -> String {
+pub(crate) fn normalize_to_local(ts: &str) -> String {
     use chrono::{DateTime, Local};
 
     match DateTime::parse_from_rfc3339(ts) {

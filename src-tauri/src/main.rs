@@ -11,6 +11,9 @@ fn main() {
         .setup(|app| {
             log::info!("Ingst application starting...");
             ingst_lib::utils::paths::log_sidecar_status();
+            // Resolve now rather than on the first thumbnail, so the log says
+            // which backend is in use before anything depends on it.
+            let _ = ingst_lib::ingest::video::backend();
 
             let window = app.get_webview_window("main").unwrap();
             window.set_title("Ingst").ok();
