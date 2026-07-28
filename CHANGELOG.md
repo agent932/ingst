@@ -20,6 +20,13 @@ mostly an Insta360 Luna Ultra card.
 - **Files of 64–128 KiB were fingerprinted from their first 64 KiB alone**,
   making the rest of the file — including its last byte — invisible to the
   duplicate check.
+- **A malformed date no longer aborts the entire ingest.** The year and month
+  were carved out of a parsed string by byte offset, which panicked on an
+  unpadded month such as `2024-1-15` — reachable from ordinary EXIF. Because
+  planning runs on a worker thread, one bad file failed the whole run with no
+  explanation and nothing copied. Dates that cannot be read now file under
+  `UnknownDate/UnknownMonth` instead of folders named from fragments of the
+  failed value.
 - **Interrupted copies no longer leave corrupt files.** Copies were written
   straight to their final path, so a crash or an unplugged drive left a
   truncated file under a real media name that nothing marked as bad, and that
@@ -86,11 +93,6 @@ mostly an Insta360 Luna Ultra card.
 - Media formats are defined in one registry instead of four hardcoded lists.
 - Source scanning skips hidden and system directories, and per-source
   exclusions now work.
-
-### Known issues
-
-- `parse_date_for_path` can return fewer than seven characters for an unpadded
-  month, which panics the plan. One malformed file aborts the whole ingest.
 
 ## v0.1.0 (2026-02-24)
 - Initial release

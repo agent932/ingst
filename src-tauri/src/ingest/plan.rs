@@ -76,19 +76,18 @@ pub fn build_plan_sync(
             .unwrap_or_else(|| source_label.clone());
         let device_name = sanitize_device_name(&device_name);
         
-        let date_path = capture_date
+        // A date that can't be read is filed under a folder a user can recognise
+        // and go looking through, rather than under whatever the string happened
+        // to start with.
+        let (year, month) = capture_date
             .as_ref()
-            .and_then(|d| parse_date_for_path(d))
-            .unwrap_or_else(|| {
-                parse_date_for_path(&file.modified).unwrap_or_else(|| "UnknownDate".to_string())
-            });
-        
-        let year = &date_path[0..4];
-        let month = &date_path[5..7];
-        
+            .and_then(|d| parse_year_month(d))
+            .or_else(|| parse_year_month(&file.modified))
+            .unwrap_or_else(|| ("UnknownDate".to_string(), "UnknownMonth".to_string()));
+
         let dest_dir = dest_root
-            .join(year)
-            .join(month)
+            .join(&year)
+            .join(&month)
             .join(&device_name);
 
         // Guard: reject any path that escapes dest_root after joining.
@@ -330,14 +329,36 @@ fn sanitize_device_name(name: &str) -> String {
     }
 }
 
-pub fn parse_date_for_path(date_str: &str) -> Option<String> {
+/// Split a timestamp into the year and month folder names it belongs under.
+///
+/// Capture dates come from ffprobe and EXIF, which promise neither zero padding
+/// nor a sane value, so the month is padded and both halves are validated here:
+/// callers get either a well-formed pair or nothing, never a half-parsed string
+/// they have to slice.
+pub fn parse_year_month(date_str: &str) -> Option<(String, String)> {
     let date_part = date_str.split('T').next()?;
-    let parts: Vec<&str> = date_part.split('-').collect();
-    if parts.len() >= 2 {
-        Some(format!("{}/{}", parts[0], parts[1]))
-    } else {
-        None
+    let mut parts = date_part.split('-');
+    let year = parts.next()?.trim();
+    let month = parts.next()?.trim();
+
+    if year.len() != 4 || !year.chars().all(|c| c.is_ascii_digit()) {
+        return None;
     }
+    if month.is_empty() || month.len() > 2 || !month.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let month_num: u32 = month.parse().ok()?;
+    if !(1..=12).contains(&month_num) {
+        return None;
+    }
+
+    Some((year.to_string(), format!("{:02}", month_num)))
+}
+
+/// The "YYYY/MM" form of [`parse_year_month`], for callers that want one string.
+pub fn parse_date_for_path(date_str: &str) -> Option<String> {
+    parse_year_month(date_str).map(|(year, month)| format!("{}/{}", year, month))
 }
 
 /// Pick a destination path for `filename` inside `dir` that collides with
@@ -678,27 +699,71 @@ mod tests {
     /// single file is copied. Every accepted input must be safe to slice that
     /// way, i.e. exactly `YYYY/MM`.
     #[test]
-    #[ignore = "documents a latent panic: parse_date_for_path can return fewer than 7 bytes"]
-    fn parse_date_for_path_output_is_always_sliceable_by_callers() {
+    fn parse_date_for_path_output_is_always_well_formed() {
         let inputs = [
             "2024-1-5T10:00:00",  // unpadded EXIF date, via parse_exif_datetime
             "2024-1",             // unpadded, no day
             "99-1T00:00:00",      // two-digit year from a mis-set camera clock
             "2026-07-23T07:30:20",
+            "UnknownDate",
+            "2024-13-01",         // month out of range
+            "",
         ];
 
         for input in inputs {
             if let Some(date_path) = parse_date_for_path(input) {
-                assert!(
-                    date_path.len() >= 7,
-                    "{input:?} -> {date_path:?} is too short for the [0..4]/[5..7] slice callers do"
+                assert_eq!(
+                    date_path.len(),
+                    7,
+                    "{input:?} -> {date_path:?} must be exactly YYYY/MM"
                 );
-                let year = &date_path[0..4];
-                let month = &date_path[5..7];
+                let (year, month) = date_path.split_once('/').expect("must contain one slash");
                 assert!(year.chars().all(|c| c.is_ascii_digit()), "{input:?} -> year {year:?}");
                 assert!(month.chars().all(|c| c.is_ascii_digit()), "{input:?} -> month {month:?}");
+                assert_eq!(month.len(), 2, "{input:?} -> month {month:?} must be padded");
             }
         }
+    }
+
+    /// The two halves are joined as folder names directly, so an unreadable
+    /// date must produce something a person can find rather than a fragment of
+    /// the failed input. Before, "UnknownDate" was sliced into "Unkn" and "wn".
+    #[test]
+    fn unreadable_dates_file_under_a_nameable_folder() {
+        let src = std::env::temp_dir().join("ingst_unknown_date_src");
+        let dest = std::env::temp_dir().join("ingst_unknown_date_dest");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&src).unwrap();
+
+        // No metadata, and a name carrying no parseable stamp, so both the
+        // capture date and the filename fallback come up empty.
+        std::fs::write(src.join("CLIP.mp4"), vec![0u8; 32]).unwrap();
+
+        let plan = build_plan_sync(
+            vec![crate::SourcePath {
+                path: src.to_string_lossy().to_string(),
+                label: "CARD".into(),
+                exclusions: vec![],
+            }],
+            &crate::IngestOptions {
+                operation: "copy".into(),
+                skip_duplicates: false,
+                dest_root: dest.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+
+        for op in &plan.operations {
+            assert!(
+                !op.dest_path.contains("/Unkn/") && !op.dest_path.contains("/wn/"),
+                "a failed parse must not be sliced into folder names: {}",
+                op.dest_path
+            );
+        }
+
+        std::fs::remove_dir_all(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
     }
 
     // --- infer_device_by_directory ---------------------------------------

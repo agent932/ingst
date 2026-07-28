@@ -8,7 +8,7 @@ pub use utils::*;
 
 #[cfg(test)]
 mod tests {
-    use crate::ingest::plan::{parse_date_for_path, resolve_collision};
+    use crate::ingest::plan::{parse_date_for_path, parse_year_month, resolve_collision};
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -78,11 +78,35 @@ mod tests {
         assert_eq!(parse_date_for_path("2023-12-25T00:00:00"), Some("2023/12".to_string()));
         assert_eq!(parse_date_for_path("invalid"), None);
 
-        // Characterisation, not endorsement: an unpadded month yields a 6-char
-        // string, and `build_plan` slices the result at [0..4] and [5..7] — that
-        // second slice panics on anything shorter than 7 bytes. If this
-        // assertion starts failing because the month is padded, the hazard is
-        // gone and the assertion should be updated.
-        assert_eq!(parse_date_for_path("2024-1-15T10:30:00"), Some("2024/1".to_string()));
+        // ffprobe and EXIF do not promise zero padding, so the month is padded
+        // here — every value that comes back is the same shape.
+        assert_eq!(parse_date_for_path("2024-1-15T10:30:00"), Some("2024/01".to_string()));
+        assert_eq!(parse_date_for_path("2024-1"), Some("2024/01".to_string()));
+
+        // A date that isn't a real year and month is rejected outright, so the
+        // caller files it under an explicit unknown folder instead of under a
+        // folder named from a slice of the garbage.
+        assert_eq!(parse_date_for_path("2024-13-01T00:00:00"), None);
+        assert_eq!(parse_date_for_path("2024-00-01T00:00:00"), None);
+        assert_eq!(parse_date_for_path("24-01-15T10:30:00"), None);
+        assert_eq!(parse_date_for_path("notayear-01-15"), None);
+        assert_eq!(parse_date_for_path("2024-ab-15"), None);
+    }
+
+    /// `build_plan_sync` joins these two halves straight in as folder names, so
+    /// each must be usable on its own — the month already padded, and neither
+    /// one carved out of a longer string by byte offset.
+    #[test]
+    fn year_month_pair_is_folder_ready() {
+        assert_eq!(
+            parse_year_month("2024-1-15T10:30:00"),
+            Some(("2024".to_string(), "01".to_string()))
+        );
+        assert_eq!(
+            parse_year_month("2023-12-25T00:00:00"),
+            Some(("2023".to_string(), "12".to_string()))
+        );
+        assert_eq!(parse_year_month("2024-13-01"), None);
+        assert_eq!(parse_year_month("UnknownDate"), None);
     }
 }
