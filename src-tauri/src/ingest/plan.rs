@@ -76,19 +76,18 @@ pub fn build_plan_sync(
             .unwrap_or_else(|| source_label.clone());
         let device_name = sanitize_device_name(&device_name);
         
-        let date_path = capture_date
+        // A date that can't be read is filed under a folder a user can recognise
+        // and go looking through, rather than under whatever the string happened
+        // to start with.
+        let (year, month) = capture_date
             .as_ref()
-            .and_then(|d| parse_date_for_path(d))
-            .unwrap_or_else(|| {
-                parse_date_for_path(&file.modified).unwrap_or_else(|| "UnknownDate".to_string())
-            });
-        
-        let year = &date_path[0..4];
-        let month = &date_path[5..7];
-        
+            .and_then(|d| parse_year_month(d))
+            .or_else(|| parse_year_month(&file.modified))
+            .unwrap_or_else(|| ("UnknownDate".to_string(), "UnknownMonth".to_string()));
+
         let dest_dir = dest_root
-            .join(year)
-            .join(month)
+            .join(&year)
+            .join(&month)
             .join(&device_name);
 
         // Guard: reject any path that escapes dest_root after joining.
@@ -252,14 +251,36 @@ fn sanitize_device_name(name: &str) -> String {
     }
 }
 
-pub fn parse_date_for_path(date_str: &str) -> Option<String> {
+/// Split a timestamp into the year and month folder names it belongs under.
+///
+/// Capture dates come from ffprobe and EXIF, which promise neither zero padding
+/// nor a sane value, so the month is padded and both halves are validated here:
+/// callers get either a well-formed pair or nothing, never a half-parsed string
+/// they have to slice.
+pub fn parse_year_month(date_str: &str) -> Option<(String, String)> {
     let date_part = date_str.split('T').next()?;
-    let parts: Vec<&str> = date_part.split('-').collect();
-    if parts.len() >= 2 {
-        Some(format!("{}/{}", parts[0], parts[1]))
-    } else {
-        None
+    let mut parts = date_part.split('-');
+    let year = parts.next()?.trim();
+    let month = parts.next()?.trim();
+
+    if year.len() != 4 || !year.chars().all(|c| c.is_ascii_digit()) {
+        return None;
     }
+    if month.is_empty() || month.len() > 2 || !month.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let month_num: u32 = month.parse().ok()?;
+    if !(1..=12).contains(&month_num) {
+        return None;
+    }
+
+    Some((year.to_string(), format!("{:02}", month_num)))
+}
+
+/// The "YYYY/MM" form of [`parse_year_month`], for callers that want one string.
+pub fn parse_date_for_path(date_str: &str) -> Option<String> {
+    parse_year_month(date_str).map(|(year, month)| format!("{}/{}", year, month))
 }
 
 /// Pick a destination path for `filename` inside `dir` that collides with
