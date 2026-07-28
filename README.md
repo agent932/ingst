@@ -7,9 +7,18 @@ A polished desktop app that helps creators ingest footage from cameras, SD cards
 - **Multi-source ingestion**: Add folders, SD cards, or drives as sources
 - **Smart organization**: Organize files by date (YYYY/MM) and device name
 - **Copy or Move**: Choose between copying (keeps originals) or moving (transfers files)
-- **Duplicate detection**: Fast hash-based skip duplicates option
-- **Metadata extraction**: Reads EXIF for photos, QuickTime metadata for videos
-- **Progress tracking**: Real-time progress with speed and time estimates
+- **Verified transfers**: Every copy is checksummed against its source and only
+  moved into place once it matches, so a file in your library is never a partial
+  or corrupt one
+- **Duplicate detection**: Files already ingested are skipped, confirmed by
+  whole-file hash rather than a sample
+- **Metadata extraction**: Reads EXIF for photos and container metadata for
+  video, falling back to camera filename conventions and to the device that
+  tagged neighbouring files
+- **Sidecar handling**: `.xmp`, `.srt`, `.lut`, `.xml` and `.edl` companions
+  travel with their clip, keeping its filename
+- **Progress tracking**: Live byte progress, speed, and time estimates, through
+  both the copy and the verification pass
 - **Detailed logging**: JSON logs saved to your library for auditing
 
 ## Installation
@@ -17,7 +26,7 @@ A polished desktop app that helps creators ingest footage from cameras, SD cards
 ### macOS
 
 **Option 1: DMG Installer**
-1. Download `Ingst_0.1.0_aarch64.dmg` or `Ingst_aarch64.app.tar.gz` from the releases
+1. Download the `.dmg` or `.app.tar.gz` for your Mac from the latest release
 2. If using DMG: Open and drag `Ingst.app` to Applications
 3. If using .tar.gz: Extract and move `Ingst.app` to Applications
 4. **If you see "damaged" error**: 
@@ -73,21 +82,39 @@ ingst/
 │   ├── components/         # UI components
 │   ├── pages/              # Wizard step pages
 │   ├── store/              # Zustand state management
-│   └── lib/                # Tauri command wrappers
+│   └── utils/              # Formatting and path helpers
 ├── src-tauri/              # Rust backend
 │   ├── src/
 │   │   ├── commands.rs     # Tauri commands
 │   │   ├── ingest/         # Ingest engine
+│   │   │   ├── formats.rs  # Supported media formats (single source of truth)
 │   │   │   ├── scanner.rs  # File scanning
 │   │   │   ├── metadata.rs # Metadata extraction
-│   │   │   ├── plan.rs    # Build ingest plan
+│   │   │   ├── plan.rs     # Build ingest plan
 │   │   │   ├── executor.rs # Execute operations
-│   │   │   └── logging.rs # Log management
-│   │   └── utils/          # Helper utilities
+│   │   │   └── logging.rs  # Logs and the duplicate index
+│   │   └── utils/          # Hashing and path helpers
+│   ├── binaries/           # ffmpeg/ffprobe sidecars (fetched, not committed)
 │   └── tauri.conf.json     # Tauri configuration
-├── SPEC.md                 # Detailed specification
 └── README.md
 ```
+
+Adding support for a new camera format means one line in
+`src-tauri/src/ingest/formats.rs`.
+
+## How files are verified
+
+Copies are written to a `<name>.part` sidecar, hashed, and renamed into place
+only once the hash matches the source. Rename is atomic, so a file sitting at
+its final path has always been transferred completely and checked. If an ingest
+is interrupted, only a `.part` file is left behind, which later runs ignore.
+
+Moves across volumes take the same route and unlink the original only after the
+copy verifies. Moves within a volume are a plain rename.
+
+The source hash is computed while copying rather than by re-reading the file
+afterwards, so verification costs one extra read of the destination rather than
+a second pass over the card.
 
 ## Supported File Types
 
@@ -121,15 +148,19 @@ Example:
 - **Skip duplicates**: Enabled by default
 
 Settings are stored in:
-- macOS: `~/.config/ingst/settings.json`
+- macOS: `~/Library/Application Support/ingst/settings.json`
 - Windows: `%APPDATA%/ingst/settings.json`
 
 ## Post-MVP Backlog
 
-- Project templates ("Video Project", "Client Shoot")
+- Drag and drop folders or cards onto the window
+- Mirror to two destinations at once (working drive + backup)
+- MHL / checksum manifest export for camera-to-post handoff
+- Resume an interrupted ingest, and retry only failed files
+- Per-source device name override
+- Custom folder naming tokens (`{YYYY}/{MM}/{DD}/{device}/{project}`)
 - Per-device rules (GoPro chapters, DJI folders)
 - Proxy generation / transcode presets
-- Checksum verification mode
 - Integration hooks (DaVinci Resolve / Premiere folder templates)
 - Watch folder automation
 

@@ -17,6 +17,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The version lives in four files and the tag is a fifth. Catch drift here
+      # rather than shipping installers whose filename disagrees with the app.
+      - name: Check versions agree with the tag
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          lock=$(node -p "require('./package-lock.json').version")
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+
+          echo "tag=$tag package.json=$pkg package-lock.json=$lock tauri.conf.json=$conf Cargo.toml=$cargo"
+
+          for name in pkg lock conf cargo; do
+            eval "value=\$$name"
+            if [ "$value" != "$tag" ]; then
+              echo "::error::$name is $value but the tag is $tag"
+              exit 1
+            fi
+          done
+
       - name: Create draft release
         id: create
         uses: actions/github-script@v7

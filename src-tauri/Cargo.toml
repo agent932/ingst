@@ -1,6 +1,6 @@
 [package]
 name = "ingst"
-version = "0.1.0"
+version = "0.2.0"
 description = "Media ingestion desktop application for creators"
 authors = ["Ingst Team"]
 edition = "2021"
