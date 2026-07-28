@@ -14,10 +14,20 @@ import { getFileName } from '../utils/paths';
 // to 'photo' for anything unrecognized. Routing it through a Tauri command
 // would make a decorative icon depend on an async round trip and force a
 // loading state into every table row, for no visible gain.
+// Mirrors the video and audio rows of src-tauri/src/ingest/formats.rs, which is
+// the source of truth. This only picks which placeholder icon sits behind a
+// missing thumbnail, so a stale entry costs a wrong icon and nothing more —
+// but keep it in step when adding a format there.
+const VIDEO_EXTENSIONS = [
+  'mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', 'mxf', 'mts', 'm2ts', 'insv',
+  '3gp', 'braw', 'r3d', 'crm',
+];
+const AUDIO_EXTENSIONS = ['wav', 'mp3', 'aac', 'm4a', 'flac', 'aif', 'aiff'];
+
 function getFileType(path: string): string {
   const ext = (path.split('.').pop() || '').toLowerCase();
-  if (['mp4', 'mov', 'mxf', 'avi', 'mkv'].includes(ext)) return 'video';
-  if (['wav', 'mp3', 'aac'].includes(ext)) return 'audio';
+  if (VIDEO_EXTENSIONS.includes(ext)) return 'video';
+  if (AUDIO_EXTENSIONS.includes(ext)) return 'audio';
   return 'photo';
 }
 

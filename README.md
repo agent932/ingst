@@ -118,9 +118,30 @@ a second pass over the card.
 
 ## Supported File Types
 
-- **Video**: .mp4, .mov, .mxf, .avi, .mkv
-- **Photo**: .jpg, .jpeg, .png, .braw, .r3d, .arw, .cr2, .nef, .dng
-- **Audio**: .wav, .mp3, .aac
+**Video** — `.mp4` `.mov` `.m4v` `.avi` `.mkv` `.webm` `.3gp`, AVCHD `.mts`
+`.m2ts`, broadcast `.mxf` (Sony XDCAM, Canon XF, Panasonic P2), Insta360
+`.insv`, and camera raw `.braw` (Blackmagic) `.r3d` (RED) `.crm` (Canon Cinema
+RAW Light).
+
+**Photo** — `.jpg` `.jpeg` `.png` `.tif` `.tiff` `.heic` `.heif` `.avif`
+`.webp`, plus raw: `.dng`, `.arw` (Sony), `.cr2` `.cr3` (Canon), `.nef` `.nrw`
+(Nikon), `.rw2` (Panasonic), `.raf` (Fujifilm), `.orf` (OM System), `.pef`
+(Pentax), `.srw` (Samsung), `.3fr` (Hasselblad), `.iiq` (Phase One), `.gpr`
+(GoPro), `.insp` (Insta360).
+
+**Audio** — `.wav` `.mp3` `.aac` `.m4a` `.flac` `.aif` `.aiff`
+
+Camera proxies and thumbnails (`.lrv`, `.lrf`, `.thm`) are deliberately left on
+the card, as are files the camera did not write. A format missing from this list
+is not copied at all, so if your camera writes something absent here, please open
+an issue — adding one is a single line in
+`src-tauri/src/ingest/formats.rs`.
+
+Capture date and device name are read from EXIF for stills and container tags
+for video. Where a camera writes neither — many action cams and drones leave
+video untagged — the date is recovered from the filename and the device is
+inferred from other files in the same folder, so a shoot still lands in one
+place.
 
 ## Organization Structure
 
