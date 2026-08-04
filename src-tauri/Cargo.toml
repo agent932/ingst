@@ -9,6 +9,22 @@ edition = "2021"
 name = "ingst_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Development builds were unusably slow for the work this app actually does.
+# `full_hash` measured 27 MB/s under `tauri dev` against 530 MB/s in release —
+# a 20x gap, because everything including `sha2` compiled at opt-level 0. Since
+# every byte is hashed twice (once while copying, once verifying), that put a
+# ~13 MB/s ceiling on an ingest no matter how fast the card or the destination
+# was, and made any performance observed in dev meaningless.
+#
+# Dependencies are fully optimised; our own crate stays at opt-level 1, which
+# removes the worst of the debug overhead while keeping compiles quick and
+# backtraces useful.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
