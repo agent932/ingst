@@ -25,7 +25,9 @@ export default {
       },
       fontFamily: {
         sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif'],
-        mono: ['"JetBrains Mono"', '"SF Mono"', 'Consolas', 'monospace'],
+        // The bundled variable font registers under this exact name; plain
+        // "JetBrains Mono" is kept for anyone who has it installed locally.
+        mono: ['"JetBrains Mono Variable"', '"JetBrains Mono"', '"SF Mono"', 'Consolas', 'monospace'],
       },
     },
   },

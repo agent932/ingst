@@ -1,3 +1,17 @@
+/* Fonts are bundled, not fetched.
+ *
+ * These used to come from fonts.googleapis.com on every launch, which was
+ * wrong three ways for a desktop app: it contradicted the promise that nothing
+ * leaves your machine, it handed Google an IP and a timestamp each time the app
+ * opened, and it meant ingesting a card on location with no network fell back
+ * to system fonts and reflowed the interface. Vite emits these as local woff2
+ * inside the bundle. */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource-variable/jetbrains-mono';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
