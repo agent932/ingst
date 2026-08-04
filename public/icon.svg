@@ -1,0 +1,7 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Mirrors src-tauri/icons/icon.svg. Keep the two in step. -->
+  <rect width="64" height="64" rx="14" fill="#14181F"/>
+  <rect x="0.4" y="0.4" width="63.2" height="63.2" rx="13.7" fill="none" stroke="#2A313D" stroke-width="0.8"/>
+  <path d="M24 10 H40 V25 H49 L32 41 L15 25 H24 Z" fill="#2DD4BF"/>
+  <rect x="13" y="47" width="38" height="9" rx="4.5" fill="#64748B"/>
+</svg>

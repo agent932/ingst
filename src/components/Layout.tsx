@@ -43,11 +43,18 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div className="flex flex-col h-full bg-background-light dark:bg-background-dark">
       <header className="h-14 flex items-center justify-between px-6 border-b border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-accent rounded-lg flex items-center justify-center">
-            <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-          </div>
+          {/* Same geometry as src-tauri/icons/icon.svg, so the mark in the
+              window matches the one in the Dock. Was a cloud-upload glyph,
+              which told a first-time user their footage was going to a
+              service — the opposite of what this app does. */}
+          {/* Bare mark, no tile. The tile in src-tauri/icons/icon.svg exists so
+              the icon survives an arbitrary background in the Dock or Finder;
+              in here the header already provides that, and a near-black tile on
+              a near-black bar just dissolves. Geometry is otherwise identical. */}
+          <svg className="h-7 w-auto" viewBox="11 8 42 50" aria-hidden="true">
+            <path d="M24 10 H40 V25 H49 L32 41 L15 25 H24 Z" fill="#2DD4BF" />
+            <rect x="13" y="47" width="38" height="9" rx="4.5" fill="#64748B" />
+          </svg>
           <span className="text-lg font-semibold text-gray-900 dark:text-white">Ingst</span>
         </div>
         
