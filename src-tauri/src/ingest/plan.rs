@@ -62,9 +62,29 @@ pub fn build_plan_sync(
         seen_hashes = logging::load_existing_hashes(&options.dest_root);
     }
 
+    // A forced date replaces what the files claim, for cameras whose clock is
+    // wrong. Validated once here rather than per file: a value that is not a
+    // real year and month is ignored outright, so a bad override can never
+    // produce a nonsense folder.
+    let forced = options
+        .force_date
+        .as_deref()
+        .filter(|d| parse_year_month(d).is_some());
+
+    if options.force_date.is_some() && forced.is_none() {
+        log::warn!(
+            "Ignoring unusable force_date {:?}; filing by each file's own date instead",
+            options.force_date
+        );
+    }
+
     for (file, source_label) in &all_files {
-        let capture_date = file.capture_date.clone()
-            .or_else(|| Some(file.modified.clone()));
+        let capture_date = match forced {
+            // Midday, so the stored timestamp cannot land on a neighbouring
+            // day if anything downstream shifts it by a timezone.
+            Some(d) => Some(format!("{}T12:00:00", d)),
+            None => file.capture_date.clone().or_else(|| Some(file.modified.clone())),
+        };
 
         let device_name = file.device_name.clone()
             .filter(|d| !d.trim().is_empty())
@@ -460,6 +480,7 @@ mod tests {
             operation: "copy".to_string(),
             skip_duplicates,
             dest_root: dest.to_string_lossy().to_string(),
+            force_date: None,
         }
     }
 
@@ -728,6 +749,123 @@ mod tests {
     /// The two halves are joined as folder names directly, so an unreadable
     /// date must produce something a person can find rather than a fragment of
     /// the failed input. Before, "UnknownDate" was sliced into "Unkn" and "wn".
+    /// A camera whose clock is wrong scatters one shoot across folders named
+    /// for whatever year it thinks it is. Forcing a date must collapse all of
+    /// them into that one date's folder, whatever the files claim.
+    #[test]
+    fn forced_date_overrides_what_the_files_claim() {
+        let src = std::env::temp_dir().join("ingst_force_src");
+        let dest = std::env::temp_dir().join("ingst_force_dest");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Names carrying wildly different dates, which the filename parser reads.
+        std::fs::write(src.join("VID_20160101_120000_001.mp4"), vec![1u8; 64]).unwrap();
+        std::fs::write(src.join("VID_20240715_090000_002.mp4"), vec![2u8; 64]).unwrap();
+
+        let plan = build_plan_sync(
+            vec![crate::SourcePath {
+                path: src.to_string_lossy().to_string(),
+                label: "CARD".into(),
+                exclusions: vec![],
+            }],
+            &crate::IngestOptions {
+                operation: "copy".into(),
+                skip_duplicates: false,
+                dest_root: dest.to_string_lossy().to_string(),
+                force_date: Some("2026-08-04".into()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.operations.len(), 2);
+        for op in &plan.operations {
+            assert!(
+                op.dest_path.contains("/2026/08/"),
+                "every file must land under the forced date, got {}",
+                op.dest_path
+            );
+            assert!(!op.dest_path.contains("/2016/"), "stale date leaked: {}", op.dest_path);
+            assert!(!op.dest_path.contains("/2024/"), "stale date leaked: {}", op.dest_path);
+        }
+
+        std::fs::remove_dir_all(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
+    /// A forced date must never rename anything. It moves which folder a file
+    /// lands in; the filename is what an NLE and the user recognise.
+    #[test]
+    fn forced_date_leaves_filenames_untouched() {
+        let src = std::env::temp_dir().join("ingst_force_names_src");
+        let dest = std::env::temp_dir().join("ingst_force_names_dest");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("A001_C002.MP4"), vec![3u8; 64]).unwrap();
+
+        let plan = build_plan_sync(
+            vec![crate::SourcePath {
+                path: src.to_string_lossy().to_string(),
+                label: "CARD".into(),
+                exclusions: vec![],
+            }],
+            &crate::IngestOptions {
+                operation: "copy".into(),
+                skip_duplicates: false,
+                dest_root: dest.to_string_lossy().to_string(),
+                force_date: Some("2026-08-04".into()),
+            },
+        )
+        .unwrap();
+
+        assert!(plan.operations[0].dest_path.ends_with("A001_C002.MP4"));
+
+        std::fs::remove_dir_all(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
+    /// A malformed override must be ignored rather than producing a folder
+    /// named out of the broken value — the same hazard the date-slicing panic
+    /// came from.
+    #[test]
+    fn unusable_forced_date_falls_back_to_the_files() {
+        let src = std::env::temp_dir().join("ingst_force_bad_src");
+        let dest = std::env::temp_dir().join("ingst_force_bad_dest");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("VID_20240715_090000_002.mp4"), vec![4u8; 64]).unwrap();
+
+        for bad in ["not-a-date", "2026-13-01", "", "2026"] {
+            let plan = build_plan_sync(
+                vec![crate::SourcePath {
+                    path: src.to_string_lossy().to_string(),
+                    label: "CARD".into(),
+                    exclusions: vec![],
+                }],
+                &crate::IngestOptions {
+                    operation: "copy".into(),
+                    skip_duplicates: false,
+                    dest_root: dest.to_string_lossy().to_string(),
+                    force_date: Some(bad.into()),
+                },
+            )
+            .unwrap();
+
+            let p = &plan.operations[0].dest_path;
+            assert!(
+                p.contains("/2024/07/"),
+                "override {bad:?} should have been ignored, got {p}"
+            );
+            assert!(!p.contains(bad) || bad.is_empty(), "override {bad:?} leaked into {p}");
+        }
+
+        std::fs::remove_dir_all(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
     #[test]
     fn unreadable_dates_file_under_a_nameable_folder() {
         let src = std::env::temp_dir().join("ingst_unknown_date_src");
@@ -750,7 +888,8 @@ mod tests {
                 operation: "copy".into(),
                 skip_duplicates: false,
                 dest_root: dest.to_string_lossy().to_string(),
-            },
+            force_date: None,
+        },
         )
         .unwrap();
 

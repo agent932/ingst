@@ -49,6 +49,15 @@ pub struct IngestOptions {
     pub operation: String,
     pub skip_duplicates: bool,
     pub dest_root: String,
+    /// `YYYY-MM-DD` to file everything under, ignoring what the files claim.
+    ///
+    /// Camera clocks are wrong constantly — a flat battery resets them, and
+    /// plenty are never set at all — which scatters one shoot across folders
+    /// named for whatever year the camera thinks it is. This is the escape
+    /// hatch for that, and it is deliberately explicit rather than something
+    /// the app guesses at.
+    #[serde(default)]
+    pub force_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

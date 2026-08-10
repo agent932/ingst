@@ -24,6 +24,7 @@ export default function IngestPage() {
     destination, 
     operation, 
     skipDuplicates, 
+    forceDate,
     progress, 
     setProgress,
     setIngestResult,
@@ -101,6 +102,9 @@ export default function IngestPage() {
           operation,
           skip_duplicates: skipDuplicates,
           dest_root: destination,
+          // Carried through so the saved log records that the folder dates
+          // were chosen rather than read off the files.
+          force_date: forceDate,
         },
       });
       

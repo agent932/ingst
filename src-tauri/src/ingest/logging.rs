@@ -59,6 +59,10 @@ pub struct IngestOptionsLog {
     pub operation: String,
     pub skip_duplicates: bool,
     pub dest_root: String,
+    /// Recorded so a later reader of this log can tell that the folder dates
+    /// were chosen by the user rather than read off the files.
+    #[serde(default)]
+    pub force_date: Option<String>,
 }
 
 pub fn create_log_entry(
@@ -109,6 +113,7 @@ pub fn save_log(
             operation: options.operation.clone(),
             skip_duplicates: options.skip_duplicates,
             dest_root: options.dest_root.clone(),
+            force_date: options.force_date.clone(),
         },
         entries: entries.to_vec(),
     };
@@ -370,7 +375,8 @@ mod tests {
                 operation: "copy".to_string(),
                 skip_duplicates: true,
                 dest_root: dest_root.clone(),
-            },
+            force_date: None,
+        },
             entries: vec![
                 entry("success", Some("only-in-the-log"), "old.mp4"),
                 entry("error", Some("failed-in-the-log"), "bad.mp4"),
@@ -421,7 +427,8 @@ mod tests {
                 operation: "copy".to_string(),
                 skip_duplicates: true,
                 dest_root: dest_root.clone(),
-            },
+            force_date: None,
+        },
             entries: vec![shared.clone()],
         };
         fs::write(
@@ -514,6 +521,7 @@ mod tests {
             operation: "copy".to_string(),
             skip_duplicates: true,
             dest_root: dest_root.clone(),
+            force_date: None,
         };
         let entries = vec![entry("success", Some("saved-hash"), "a.mp4")];
 

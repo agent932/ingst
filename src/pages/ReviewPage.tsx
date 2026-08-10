@@ -1,23 +1,17 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore, IngestPlan } from '../store/useStore';
 import { formatSize } from '../utils/formatters';
 import { getFileName } from '../utils/paths';
 
 
-// MIRROR of the video/audio rows in `src-tauri/src/ingest/formats.rs`
-// (MEDIA_FORMATS) — the backend is the source of truth. Adding a camera format
-// there means adding it here too, if it is video or audio.
-//
-// This is deliberately not fetched from the backend: the result only chooses
-// the placeholder icon drawn behind a missing thumbnail, and it falls through
-// to 'photo' for anything unrecognized. Routing it through a Tauri command
-// would make a decorative icon depend on an async round trip and force a
-// loading state into every table row, for no visible gain.
 // Mirrors the video and audio rows of src-tauri/src/ingest/formats.rs, which is
-// the source of truth. This only picks which placeholder icon sits behind a
-// missing thumbnail, so a stale entry costs a wrong icon and nothing more —
-// but keep it in step when adding a format there.
+// the source of truth. Deliberately not fetched from the backend: the result
+// only picks the placeholder icon drawn behind a missing thumbnail and falls
+// through to 'photo' for anything unrecognised, so a stale entry costs a wrong
+// icon and nothing more. Routing it through a Tauri command would make a
+// decorative icon depend on an async round trip. Keep it in step when adding a
+// format there.
 const VIDEO_EXTENSIONS = [
   'mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', 'mxf', 'mts', 'm2ts', 'insv',
   '3gp', 'braw', 'r3d', 'crm',
@@ -82,7 +76,8 @@ function Thumbnail({ src, fileType }: { src: string | null | undefined; fileType
 }
 
 export default function ReviewPage() {
-  const { sources, destination, operation, skipDuplicates, setIngestPlan, nextStep, prevStep } = useStore();
+  const { sources, destination, operation, skipDuplicates, forceDate, setForceDate,
+          setIngestPlan, nextStep, prevStep } = useStore();
   const [isBuilding, setIsBuilding] = useState(false);
   const [plan, setPlan] = useState<IngestPlan | null>(null);
   const [filter, setFilter] = useState<'all' | 'unknown' | 'duplicates'>('all');
@@ -102,10 +97,58 @@ export default function ReviewPage() {
     buildPlan();
   }, []);
 
-  const buildPlan = async () => {
+  /**
+   * Files dated further than this from today are worth querying. A camera that
+   * has lost its clock usually reports a date years out, so this catches the
+   * real failure comfortably — but footage genuinely shot a while ago trips it
+   * too, which is why this only ever asks a question and never blocks.
+   */
+  const DATE_WARN_DAYS = 14;
+
+  const dateOutliers = useMemo(() => {
+    if (!plan) return null;
+    const now = Date.now();
+    const limit = DATE_WARN_DAYS * 86_400_000;
+
+    let count = 0;
+    let oldest = Infinity;
+    let newest = -Infinity;
+
+    for (const op of plan.operations) {
+      if (!op.capture_date) continue;
+      // No timezone suffix, so this parses as local — which is what the
+      // folder dates are in.
+      const t = Date.parse(op.capture_date);
+      if (Number.isNaN(t)) continue;
+      if (Math.abs(now - t) > limit) {
+        count++;
+        oldest = Math.min(oldest, t);
+        newest = Math.max(newest, t);
+      }
+    }
+
+    if (!count) return null;
+    const asDate = (t: number) => new Date(t).toLocaleDateString();
+    return {
+      count,
+      range: oldest === newest ? asDate(oldest) : `${asDate(oldest)} – ${asDate(newest)}`,
+      inFuture: oldest > now,
+      all: count === plan.operations.length,
+    };
+  }, [plan]);
+
+  // Local date, deliberately not toISOString(), which is UTC and would file an
+  // evening ingest under tomorrow.
+  const todayLocal = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+
+  const buildPlan = async (override: string | null = forceDate) => {
     setIsBuilding(true);
     setError(null);
-    
+
     try {
       const result = await invoke<IngestPlan>('build_ingest_plan', {
         sources: sources.map(s => ({
@@ -117,9 +160,10 @@ export default function ReviewPage() {
           operation,
           skip_duplicates: skipDuplicates,
           dest_root: destination,
+          force_date: override,
         },
       });
-      
+
       setPlan(result);
       setIngestPlan(result);
     } catch (e) {
@@ -127,6 +171,15 @@ export default function ReviewPage() {
     } finally {
       setIsBuilding(false);
     }
+  };
+
+  // The destination folder is decided while planning, so changing the date
+  // means planning again rather than just relabelling the table.
+  const toggleForceDate = () => {
+    const next = forceDate ? null : todayLocal();
+    setForceDate(next);
+    thumbLoadRef.current = false;
+    buildPlan(next);
   };
 
   useEffect(() => {
@@ -194,7 +247,9 @@ export default function ReviewPage() {
         </div>
         
         <div className="mt-4 flex gap-3">
-          <button onClick={buildPlan} className="btn btn-secondary">
+          {/* Wrapped, not passed directly: onClick would hand React's
+              MouseEvent to buildPlan's override parameter. */}
+          <button onClick={() => buildPlan()} className="btn btn-secondary">
             Try Again
           </button>
           <button onClick={prevStep} className="btn btn-secondary">
@@ -231,6 +286,51 @@ export default function ReviewPage() {
           <p className="text-sm text-gray-500 dark:text-gray-400">Skipped duplicates</p>
           <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{plan.duplicate_count}</p>
         </div>
+      </div>
+
+      {/* Camera clocks reset on a flat battery and plenty are never set, which
+          scatters one shoot across folders named for whatever year the camera
+          thinks it is. This is the manual correction for that. */}
+      <div className={`card p-4 mb-6 flex items-center justify-between gap-4 ${
+        forceDate
+          ? 'bg-accent/5 border-accent/40'
+          : dateOutliers
+          ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-300 dark:border-yellow-800'
+          : ''
+      }`}>
+        <div className="min-w-0">
+          <p className={`font-medium ${
+            !forceDate && dateOutliers
+              ? 'text-yellow-800 dark:text-yellow-300'
+              : 'text-gray-900 dark:text-white'
+          }`}>
+            {forceDate
+              ? `Filing everything under ${forceDate}`
+              : dateOutliers
+              ? `${dateOutliers.all ? 'These files are' : `${dateOutliers.count} of these files are`} dated ${dateOutliers.inFuture ? 'in the future' : 'more than two weeks ago'}`
+              : 'Wrong dates on these files?'}
+          </p>
+          <p className={`text-sm mt-0.5 ${
+            !forceDate && dateOutliers
+              ? 'text-yellow-700 dark:text-yellow-400'
+              : 'text-gray-500 dark:text-gray-400'
+          }`}>
+            {forceDate
+              ? 'Each file keeps its own name; only the year and month folders change.'
+              : dateOutliers
+              ? `${dateOutliers.range} — expected if this footage is genuinely old, but a camera that has lost its clock looks exactly like this.`
+              : 'If the camera clock was wrong, file this card under today instead of what the files claim.'}
+          </p>
+        </div>
+        <button
+          onClick={toggleForceDate}
+          disabled={isBuilding}
+          className={`btn shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
+            forceDate ? 'btn-secondary' : 'btn-primary'
+          }`}
+        >
+          {forceDate ? 'Use file dates' : "Use today's date"}
+        </button>
       </div>
 
       <div className="card mb-6">

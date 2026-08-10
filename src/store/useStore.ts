@@ -77,6 +77,14 @@ interface StoreState {
   destination: string;
   operation: 'copy' | 'move';
   skipDuplicates: boolean;
+  /**
+   * `YYYY-MM-DD` to file everything under, or null to trust the files.
+   *
+   * Held as the resolved date rather than a flag so the plan and the transfer
+   * cannot disagree about which day "today" was — an ingest running across
+   * midnight would otherwise split itself over two folders.
+   */
+  forceDate: string | null;
   scannedFiles: ScannedFile[];
   ingestPlan: IngestPlan | null;
   progress: ProgressEvent | null;
@@ -95,6 +103,7 @@ interface StoreState {
   setDestination: (path: string) => void;
   setOperation: (op: 'copy' | 'move') => void;
   setSkipDuplicates: (skip: boolean) => void;
+  setForceDate: (date: string | null) => void;
   setScannedFiles: (files: ScannedFile[]) => void;
   setIngestPlan: (plan: IngestPlan | null) => void;
   setProgress: (progress: ProgressEvent | null) => void;
@@ -116,6 +125,7 @@ export const useStore = create<StoreState>((set, get) => ({
   destination: '',
   operation: 'copy',
   skipDuplicates: true,
+  forceDate: null,
   scannedFiles: [],
   ingestPlan: null,
   progress: null,
@@ -149,6 +159,7 @@ export const useStore = create<StoreState>((set, get) => ({
   setDestination: (path) => set({ destination: path }),
   setOperation: (op) => set({ operation: op }),
   setSkipDuplicates: (skip) => set({ skipDuplicates: skip }),
+  setForceDate: (date) => set({ forceDate: date }),
   setScannedFiles: (files) => set({ scannedFiles: files }),
 
   // A new plan means a new run: clear the previous run's progress, result, and
@@ -212,6 +223,9 @@ export const useStore = create<StoreState>((set, get) => ({
     // which used to silently undo their Settings choices on every new ingest.
     operation: (state.settings.default_operation as 'copy' | 'move') || 'copy',
     skipDuplicates: state.settings.skip_duplicates_default,
+    // A date override corrects one specific card's clock; it must never
+    // silently carry over to the next ingest.
+    forceDate: null,
     scannedFiles: [],
     ingestPlan: null,
     progress: null,
